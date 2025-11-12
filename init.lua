@@ -84,9 +84,9 @@ local function can_connect(aname, bname)
   local F  = NAME.."encased_fan"
   local H  = NAME.."hand_crank"
 
-  -- Wheel mates only with gantry or bare shaft
-  if aname == W then return (bname == G or bname == S) end
-  if bname == W then return (aname == G or aname == S) end
+    -- Wheel mates with gantry, bare shaft, or a fan
+  if aname == W then return (bname == G or bname == S or bname == F) end
+  if bname == W then return (aname == G or aname == S or aname == F) end
 
   -- Gantry bridges wheel ↔ driveline (and can pass to fan)
   if aname == G then return (bname == W or bname == S or bname == X or bname == G or bname == F) end
@@ -144,6 +144,7 @@ local function bfs(accum, start_pos, base_power)
   end
 end
 
+
 -- -------------------------------------------------
 -- Globalstep: solve network + drive consumers
 -- -------------------------------------------------
@@ -173,6 +174,31 @@ min.register_globalstep(function(dtime)
   end
 
   fabricate.power_grid = accum
+
+-- === Terminal fan backfill ===
+-- If a fan is adjacent to any powered mechanical neighbor, give it neighbor_power - 1.
+for key, pos in pairs(fabricate.tracked_mech) do
+  local n = min.get_node_or_nil(pos)
+  if n and n.name == NS.."encased_fan" then
+    local selfk = pos_to_key(pos)
+    if not accum[selfk] then
+      local best = 0
+      for _, d in ipairs(DIRS) do
+        local np = {x=pos.x+d.x, y=pos.y+d.y, z=pos.z+d.z}
+        local nn = min.get_node_or_nil(np)
+        if nn and is_mech(nn.name) and can_connect(n.name, nn.name) then
+          local ek = pos_to_key(np)
+          local e  = accum[ek]
+          if e and e.power > best then best = e.power end
+        end
+      end
+      if best > 0 then
+        local p = math.max(1, best - 1)
+        accum[selfk] = { pos = vector.new(pos), power = p }
+      end
+    end
+  end
+end
 
   -- Reset infotexts
   for _, pos in pairs(fabricate.tracked_mech) do
@@ -373,13 +399,16 @@ get_power_for[NS.."water_wheel"] = function(pos, node, dt, now)
   return 0
 end
 
--- Encased Fan (consumer)
+-- === Encased Fan (consumer) ===
 min.register_node(NS.."encased_fan", {
   description = "Fabricate Encased Fan",
   tiles = {
-    "fabricate_fan_back.png","fabricate_fan_back.png",
-    "fabricate_fan_casing.png","fabricate_fan_casing.png",
-    "fabricate_fan_casing.png","fabricate_fan_front.png",
+    "fabricate_fan_back.png",   -- top
+    "fabricate_fan_back.png",   -- bottom
+    "fabricate_fan_casing.png", -- right
+    "fabricate_fan_casing.png", -- left
+    "fabricate_fan_casing.png", -- back
+    "fabricate_fan_front.png",  -- front (blows along facedir)
   },
   paramtype2   = "facedir",
   groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
@@ -390,25 +419,48 @@ min.register_node(NS.."encased_fan", {
   on_destruct  = untrack_mech,
 })
 
+-- Runs at power >= 2 (lower than before), and applies a gentle push.
 on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
   local meta = min.get_meta(pos)
-  if power < 3 then meta:set_string("infotext","Encased Fan (no power)"); return end
+  if power < 2 then meta:set_string("infotext","Encased Fan (no power)");
+    return
+  end
+
   meta:set_string("infotext","Encased Fan (power "..power..")")
 
-  -- simple push effect (optional)
+  -- Optional wind effect: pushes in the facedir axis.
   local dir   = facedir_to_dir(node.param2 or 0)
   local range = math.min(4 + math.floor(power/2), 12)
-  local c = { x = pos.x + dir.x * (range*0.5 + 0.5),
-              y = pos.y + dir.y * (range*0.5),
-              z = pos.z + dir.z * (range*0.5 + 0.5) }
-  for _,obj in ipairs(min.get_objects_inside_radius(c, range+1)) do
+
+  -- Center a bit forward so the push is mostly in front of the fan.
+  local c = {
+    x = pos.x + dir.x * (range * 0.5 + 0.5),
+    y = pos.y + dir.y * (range * 0.5),
+    z = pos.z + dir.z * (range * 0.5 + 0.5),
+  }
+
+  for _, obj in ipairs(min.get_objects_inside_radius(c, range + 1)) do
     if obj:is_player() or obj:get_luaentity() then
-      local v = obj:get_velocity() or {x=0,y=0,z=0}
-      local boost = (power/8)*4
-      obj:set_velocity({ x = v.x + dir.x*boost, y = v.y + (dir.y*boost*0.2), z = v.z + dir.z*boost })
+      local v = obj:get_velocity() or {x=0, y=0, z=0}
+      local boost = (power / 8) * 4
+      obj:set_velocity({
+        x = v.x + dir.x * boost,
+        y = v.y + (dir.y * boost * 0.2),
+        z = v.z + dir.z * boost,
+      })
     end
   end
 end
+
+-- Track all existing fabricate_mech nodes when a mapblock loads
+min.register_lbm({
+  name = NS.."track_existing_mech",
+  nodenames = {"group:fabricate_mech"},
+  run_at_every_load = true,
+  action = function(pos, node)
+    track_mech(pos)
+  end,
+})
 
 -- -------------------------------------------------
 -- Crafting
@@ -461,5 +513,52 @@ min.register_chatcommand("fab_debug", {
     min.chat_send_player(name, "Powered Fabricate nodes:")
     for _, line in ipairs(out) do min.chat_send_player(name, "  "..line) end
     return true, ""
+  end
+})
+
+
+min.register_chatcommand("fab_probe", {
+  description = "Show Fabricate power at the pointed node",
+  func = function(name)
+    local pl = min.get_player_by_name(name); if not pl then return false,"no player" end
+    local eye = pl:get_pos(); eye.y = eye.y + 1.5
+    local look = pl:get_look_dir()
+    local ray = min.raycast(eye, {x=eye.x+look.x*6,y=eye.y+look.y*6,z=eye.z+look.z*6}, true, false)
+    local target
+    for hit in ray do if hit.type=="node" then target = hit.under; break end end
+    if not target then return true, "No node targeted." end
+    local k = pos_to_key(target)
+    local e = fabricate.power_grid[k]
+    local n = min.get_node_or_nil(target)
+    local name_str = n and n.name or "?"
+    if e then
+      return true, ("%s at %s has power %d"):format(name_str, min.pos_to_string(target), e.power)
+    else
+      return true, ("%s at %s has NO power"):format(name_str, min.pos_to_string(target))
+    end
+  end
+})
+
+min.register_chatcommand("fab_rescan", {
+  description = "Rescan a radius around you and (re)track Fabricate parts",
+  params = "[radius]",
+  func = function(name, param)
+    local player = min.get_player_by_name(name); if not player then return false, "No player." end
+    local r = tonumber(param) or 16
+    local pmin = vector.subtract(vector.round(player:get_pos()), r)
+    local pmax = vector.add(vector.round(player:get_pos()), r)
+    local count = 0
+    for x = pmin.x, pmax.x do
+      for y = pmin.y, pmax.y do
+        for z = pmin.z, pmax.z do
+          local pos = {x=x,y=y,z=z}
+          local n = min.get_node_or_nil(pos)
+          if n and is_mech(n.name) then
+            track_mech(pos); count = count + 1
+          end
+        end
+      end
+    end
+    return true, ("Tracked %d mechanical nodes within r=%d."):format(count, r)
   end
 })
