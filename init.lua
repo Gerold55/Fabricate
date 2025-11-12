@@ -717,6 +717,374 @@ min.register_craft({ output = NS.."mechanical_drill", recipe = {
   {"default:steel_ingot", NS.."gearbox",     "default:steel_ingot"},
 }})
 
+-- ======================================================================
+-- Create-like 2-Pulley Conveyor Belts
+-- ======================================================================
+
+-- -------- Tunables -----------------------------------------------------
+local BELT_MIN_POWER   = 2
+local BELT_BASE_SPEED  = 1.6   -- m/s at min power
+local BELT_SPEED_GAIN  = 0.25  -- m/s per extra power
+local BELT_SPEED_MAX   = 6.0
+local BELT_CENTER_PULL = 2.2
+local BELT_PICKUP_Y    = 0.55
+local BELT_FRICTION    = 0.10
+
+local function belt_speed_for_power(p)
+  if not p or p < BELT_MIN_POWER then return 0 end
+  local s = BELT_BASE_SPEED + (p - BELT_MIN_POWER) * BELT_SPEED_GAIN
+  return (s > BELT_SPEED_MAX) and BELT_SPEED_MAX or s
+end
+
+-- -------- Runtime registry ---------------------------------------------
+fabricate.belts = fabricate.belts or {}   -- line_id -> {segments={pos...}, axis="x"/"z", dir=±1, slope=0/±1, speed=0}
+local BELT_COUNTER = 0
+local function new_line_id()
+  BELT_COUNTER = BELT_COUNTER + 1
+  return "belt_"..min.get_gametime().."_"..BELT_COUNTER
+end
+
+-- -------- Nodes: pulleys & segments ------------------------------------
+
+-- Segment nodeboxes (flat and slope “step”)
+local BELT_FLAT_BOX = {
+  type="fixed",
+  fixed={
+    {-0.5, -0.5, -0.5,  0.5, -0.375, 0.5},
+    {-0.5, -0.375,-0.5,  0.5, -0.345, 0.5},
+  }
+}
+local BELT_STEP_BOX = {
+  type="fixed",
+  fixed={
+    {-0.5, -0.5, -0.5,  0.5, -0.375, 0.5}, -- base
+    {-0.5, -0.375,-0.5,  0.5, -0.312, 0.5}, -- slightly higher “ramp”
+  }
+}
+
+-- Pulley (drive/endpoints)
+min.register_node(NS.."belt_pulley", {
+  description = "Fabricate Belt Pulley",
+  tiles = {
+    "mcl_core_iron_block.png","mcl_core_iron_block.png",
+    "mcl_core_iron_block.png","mcl_core_iron_block.png",
+    "mcl_core_iron_block.png","mcl_core_iron_block.png",
+  },
+  paramtype2   = "facedir",
+  groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
+  on_construct = function(pos)
+    track_mech(pos)
+    min.get_meta(pos):set_string("infotext","Pulley (no belt)")
+  end,
+  on_destruct  = function(pos)
+    -- If this pulley anchors a belt, tear the belt down.
+    local m   = min.get_meta(pos)
+    local lid = m:get_string("belt_line_id")
+    if lid ~= "" then
+      local line = fabricate.belts[lid]
+      if line then
+        for _,sp in ipairs(line.segments) do
+          local n = min.get_node_or_nil(sp)
+          if n and (n.name == NS.."belt_segment" or n.name == NS.."belt_segment_slope") then
+            min.remove_node(sp)
+          end
+        end
+        fabricate.belts[lid] = nil
+      end
+    end
+    untrack_mech(pos)
+  end,
+})
+
+-- Flat segment
+min.register_node(NS.."belt_segment", {
+  description = "Fabricate Belt Segment (Flat)",
+  drawtype    = "nodebox",
+  node_box    = BELT_FLAT_BOX,
+  selection_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.345,0.5}} },
+  collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.375,0.5}} },
+  tiles       = {
+    "mcl_core_iron_block.png^[colorize:#3a3a3a:180",
+    "mcl_core_iron_block.png^[colorize:#1e1e1e:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+  },
+  paramtype   = "light",
+  paramtype2  = "facedir", -- axis/orientation
+  groups      = { cracky=2, not_in_creative_inventory=1 },
+  drop        = "", -- segments are virtual; breaking pulleys returns belts
+})
+
+-- Slope “step” segment
+min.register_node(NS.."belt_segment_slope", {
+  description = "Fabricate Belt Segment (Slope)",
+  drawtype    = "nodebox",
+  node_box    = BELT_STEP_BOX,
+  selection_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.312,0.5}} },
+  collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.375,0.5}} },
+  tiles       = {
+    "mcl_core_iron_block.png^[colorize:#3a3a3a:160",
+    "mcl_core_iron_block.png^[colorize:#1e1e1e:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+    "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
+  },
+  paramtype   = "light",
+  paramtype2  = "facedir",
+  groups      = { cracky=2, not_in_creative_inventory=1 },
+  drop        = "",
+})
+
+-- Belts get power via pulleys: show speed in infotext. Movement happens in belt step.
+on_power_for[NS.."belt_pulley"] = function(pos, node, power, dt)
+  local m   = min.get_meta(pos)
+  local lid = m:get_string("belt_line_id")
+  local speed = belt_speed_for_power(power)
+  if lid ~= "" then
+    local line = fabricate.belts[lid]
+    if line then line.speed = math.max(line.speed, speed) end -- either end can drive; take max
+    m:set_string("infotext", ("Pulley (belt %s) speed %.2f m/s"):format(lid, speed))
+  else
+    m:set_string("infotext", (speed>0) and ("Pulley (no belt) speed %.2f m/s"):format(speed) or "Pulley (no belt)")
+  end
+end
+
+-- -------- Belt building tool (spool) -----------------------------------
+min.register_craftitem(NS.."belt_spool", {
+  description = "Fabricate Belt Spool",
+  inventory_image = "mcl_core_iron_block.png^[colorize:#3a3a3a:150",
+  on_use = function(stack, user, pointed)
+    if not user or not pointed or pointed.type ~= "node" then return stack end
+    local pos = pointed.under
+    local n   = min.get_node_or_nil(pos)
+    if not n or n.name ~= NS.."belt_pulley" then
+      min.chat_send_player(user:get_player_name(), "Click a belt pulley.")
+      return stack
+    end
+    local meta = user:get_meta()
+    local stored = meta:get_string("fab_spool_first")
+    if stored == "" then
+      meta:set_string("fab_spool_first", min.pos_to_string(pos))
+      min.chat_send_player(user:get_player_name(), "First pulley set. Click the second pulley.")
+      return stack
+    end
+    local p1 = min.string_to_pos(stored)
+    meta:set_string("fab_spool_first","")
+    if not p1 then return stack end
+    -- Build between p1 and pos
+    local ok, err = (function(a,b)
+      -- Same axis X or Z only (like Create). Y may differ.
+      if a.x ~= b.x and a.z ~= b.z then
+        return false, "Pulleys must align on X or Z."
+      end
+      -- Determine axis/dir
+      local axis, dir, len
+      if a.x == b.x then axis="z"; dir = (b.z > a.z) and 1 or -1; len = math.abs(b.z - a.z)
+      else               axis="x"; dir = (b.x > a.x) and 1 or -1; len = math.abs(b.x - a.x) end
+      local dy = b.y - a.y
+      -- Refuse zero-length
+      if len == 0 and dy == 0 then return false, "Pulleys overlap." end
+
+      -- Reserve a line id and write to both pulleys
+      local lid = new_line_id()
+      fabricate.belts[lid] = {segments={}, axis=axis, dir=dir, slope=(dy==0) and 0 or ((dy>0) and 1 or -1), speed=0}
+
+      min.get_meta(a):set_string("belt_line_id", lid)
+      min.get_meta(b):set_string("belt_line_id", lid)
+
+      -- Lay segments from a → b. We stair-step Y until we match dy, then run flat.
+      local sx = a.x; local sy = a.y; local sz = a.z
+      local ex = b.x; local ey = b.y; local ez = b.z
+
+      local step_axis = (axis=="x") and "x" or "z"
+      local total_steps = (axis=="x") and math.abs(ex - sx) or math.abs(ez - sz)
+      local remaining_y = dy
+
+      local place_seg = function(p, nodename, param2)
+        -- refuse to overwrite non-air
+        local nn = min.get_node_or_nil(p)
+        if nn and nn.name ~= "air" and nn.name ~= NS.."belt_segment" and nn.name ~= NS.."belt_segment_slope" then
+          return false, "Path blocked at "..min.pos_to_string(p)
+        end
+        min.set_node(p, {name=nodename, param2=param2})
+        table.insert(fabricate.belts[lid].segments, vector.new(p))
+        return true
+      end
+
+      local facedir = (axis=="x") and ((dir==1) and 1 or 3) or ((dir==1) and 0 or 2) -- shaft-like
+
+      local cx,cy,cz = sx, sy, sz
+      local ax_step = (dir==1) and 1 or -1
+      for i=1,total_steps do
+        -- slope first if we still need vertical travel
+        if remaining_y ~= 0 then
+          local slope_dir = (remaining_y>0) and 1 or -1
+          cy = cy + slope_dir
+          local okp, errp = place_seg({x=cx,y=cy,z=cz}, NS.."belt_segment_slope", facedir)
+          if not okp then fabricate.belts[lid]=nil; return false, errp end
+          remaining_y = remaining_y - slope_dir
+        else
+          local okp, errp = place_seg({x=cx,y=cy,z=cz}, NS.."belt_segment", facedir)
+          if not okp then fabricate.belts[lid]=nil; return false, errp end
+        end
+        if step_axis=="x" then cx = cx + ax_step else cz = cz + ax_step end
+      end
+
+      -- if we still have Y left after horizontal (shouldn’t happen), climb it
+      while remaining_y ~= 0 do
+        local slope_dir = (remaining_y>0) and 1 or -1
+        cy = cy + slope_dir
+        local okp, errp = place_seg({x=cx,y=cy,z=cz}, NS.."belt_segment_slope", facedir)
+        if not okp then fabricate.belts[lid]=nil; return false, errp end
+        remaining_y = remaining_y - slope_dir
+      end
+
+      min.chat_send_player(user:get_player_name(), "Belt built: "..lid)
+      return true
+    end)(p1, pos)
+
+    if not ok then
+      min.chat_send_player(user:get_player_name(), "Belt failed: "..(err or "?"))
+    end
+    return stack
+  end
+})
+
+-- Allow removing belts by punching a segment (drops the spool back)
+min.register_on_punchnode(function(pos, node, puncher, pointed_thing)
+  if node.name ~= NS.."belt_segment" and node.name ~= NS.."belt_segment_slope" then return end
+  -- Find line id by scanning pulleys around the run (cheap: look 8 blocks around)
+  local removed = false
+  local around = min.find_nodes_in_area(
+    {x=pos.x-8,y=pos.y-8,z=pos.z-8},
+    {x=pos.x+8,y=pos.y+8,z=pos.z+8},
+    {NS.."belt_pulley"}
+  )
+  for _,pp in ipairs(around or {}) do
+    local lid = min.get_meta(pp):get_string("belt_line_id")
+    if lid ~= "" then
+      local line = fabricate.belts[lid]
+      if line then
+        for _,sp in ipairs(line.segments) do
+          local n = min.get_node_or_nil(sp)
+          if n and (n.name == NS.."belt_segment" or n.name == NS.."belt_segment_slope") then
+            min.remove_node(sp)
+          end
+        end
+        fabricate.belts[lid]=nil
+        -- clear pulleys that referenced it
+        for _,pp2 in ipairs(around) do
+          if min.get_meta(pp2):get_string("belt_line_id")==lid then
+            min.get_meta(pp2):set_string("belt_line_id","")
+            min.get_meta(pp2):set_string("infotext","Pulley (no belt)")
+          end
+        end
+        removed = true
+        break
+      end
+    end
+  end
+  if removed and puncher then
+    min.chat_send_player(puncher:get_player_name(), "Belt removed.")
+  end
+end)
+
+-- -------- Movement step (items & actors) --------------------------------
+local belt_step_accum = 0
+min.register_globalstep(function(dtime)
+  belt_step_accum = belt_step_accum + dtime
+  if belt_step_accum < 0.1 then return end
+  local dt = belt_step_accum
+  belt_step_accum = 0
+
+  -- Reset all lines’ computed speed for this tick
+  for _,line in pairs(fabricate.belts) do line.speed = 0 end
+
+  -- Read speed from power at any segment’s tile (via either pulley hook already ran),
+  -- plus directly from grid at segments (in case solver put power on them later)
+  for lid, line in pairs(fabricate.belts) do
+    -- If pulleys updated speed via on_power_for, keep it; otherwise compute from local grid
+    if (line.speed or 0) <= 0 then
+      local best = 0
+      for _,p in ipairs(line.segments) do
+        local e = fabricate.power_grid[pos_to_key(p)]
+        if e and e.power and e.power > best then best = e.power end
+      end
+      line.speed = belt_speed_for_power(best)
+    end
+  end
+
+  -- Move things on each segment
+  for lid, line in pairs(fabricate.belts) do
+    local spd = line.speed or 0
+    if spd <= 0 then goto nextline end
+
+    -- forward vector from axis/dir
+    local dir = (line.axis=="x") and {x=line.dir,y=0,z=0} or {x=0,y=0,z=line.dir}
+    -- perpendicular for centering
+    local perp = (line.axis=="x") and {x=0,y=0,z=1} or {x=1,y=0,z=0}
+    local ybias = (line.slope==0) and 0 or (line.slope * 0.5) -- gentle lift on slopes
+
+    for _, segpos in ipairs(line.segments) do
+      local scan_center = {x = segpos.x + 0.5, y = segpos.y + BELT_PICKUP_Y, z = segpos.z + 0.5}
+      for _, obj in ipairs(min.get_objects_inside_radius(scan_center, 0.8)) do
+        local ent = obj:get_luaentity()
+        if ent and ent.name and ent.name:find("^"..NS) then goto nextobj end
+
+        local p = obj:get_pos(); if not p then goto nextobj end
+        if math.abs(p.y - (segpos.y + 0.525)) < 0.35 then
+          local v = obj:get_velocity() or {x=0,y=0,z=0}
+
+          -- Forward push
+          v.x = v.x + dir.x * spd * dt * 8
+          v.z = v.z + dir.z * spd * dt * 8
+
+          -- Up/down bias on slopes to keep things seated
+          v.y = (obj:is_player() and v.y) or math.min(v.y + ybias * dt, 1.0)
+
+          -- Centering
+          local off = { x = (p.x - (segpos.x + 0.5)), z = (p.z - (segpos.z + 0.5)) }
+          local lateral = off.x * perp.x + off.z * perp.z
+          v.x = v.x - perp.x * lateral * BELT_CENTER_PULL * dt
+          v.z = v.z - perp.z * lateral * BELT_CENTER_PULL * dt
+
+          -- Friction
+          v.x = v.x * (1 - BELT_FRICTION * dt)
+          v.z = v.z * (1 - BELT_FRICTION * dt)
+
+          obj:set_velocity(v)
+
+          -- Keep items from sinking
+          if not obj:is_player() and p.y < segpos.y + 0.45 then
+            obj:set_pos({x=p.x, y=segpos.y + 0.46, z=p.z})
+          end
+        end
+        ::nextobj::
+      end
+    end
+
+    ::nextline::
+  end
+end)
+
+-- -------- Crafting ------------------------------------------------------
+min.register_craft({
+  output = NS.."belt_pulley 2",
+  recipe = {
+    {"default:steel_ingot", NS.."shaft",          "default:steel_ingot"},
+    {"default:steel_ingot","default:copper_ingot","default:steel_ingot"},
+    {"default:steel_ingot", NS.."shaft",          "default:steel_ingot"},
+  }
+})
+min.register_craft({ output = NS.."belt_spool",
+  recipe = { {"group:wool","group:wool","group:wool"},
+             {"","default:steel_ingot",""},
+             {"group:wool","group:wool","group:wool"} }
+})
+
 -- -------------------------------------------------
 -- Debug commands
 -- -------------------------------------------------
