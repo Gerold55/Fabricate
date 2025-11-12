@@ -44,7 +44,6 @@ end
 -- Global registries / state
 -- -------------------------------------------------
 fabricate                    = rawget(_G, "fabricate") or {}
-_G.fabricate                 = fabricate
 fabricate.tracked_mech       = fabricate.tracked_mech       or {}
 fabricate.power_grid         = fabricate.power_grid         or {}
 fabricate.get_power_for      = fabricate.get_power_for      or {}
