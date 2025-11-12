@@ -10,6 +10,19 @@ local modname = min.get_current_modname() or "fabricate"
 local NS      = modname .. ":"
 
 -- -------------------------------------------------
+-- Global API (reload-safe)
+-- -------------------------------------------------
+fabricate = rawget(_G, "fabricate") or {}
+fabricate.tracked_mech    = fabricate.tracked_mech    or {}
+fabricate.power_grid      = fabricate.power_grid      or {}
+fabricate.get_power_for   = fabricate.get_power_for   or {}
+fabricate.on_power_for    = fabricate.on_power_for    or {}
+fabricate.dynamic_sources = fabricate.dynamic_sources or {}
+
+local get_power_for = fabricate.get_power_for
+local on_power_for  = fabricate.on_power_for
+
+-- -------------------------------------------------
 -- Helpers
 -- -------------------------------------------------
 local function pos_to_key(p) return ("%d,%d,%d"):format(p.x,p.y,p.z) end
@@ -21,8 +34,8 @@ local DIRS = {
 }
 
 local function facedir_to_dir(param2)
-  local rot = param2 % 4
-  if rot == 0 then return {x=0,y=0,z=1}
+  local rot = (param2 or 0) % 4
+  if rot == 0 then return {x=0,y=0,z= 1}
   elseif rot==1 then return {x=1,y=0,z=0}
   elseif rot==2 then return {x=0,y=0,z=-1}
   else return {x=-1,y=0,z=0} end
@@ -40,18 +53,46 @@ local function has_water_near_wheel(pos)
   return false
 end
 
--- -------------------------------------------------
--- Global registries / state
--- -------------------------------------------------
-fabricate                    = rawget(_G, "fabricate") or {}
-fabricate.tracked_mech       = fabricate.tracked_mech       or {}
-fabricate.power_grid         = fabricate.power_grid         or {}
-fabricate.get_power_for      = fabricate.get_power_for      or {}
-fabricate.on_power_for       = fabricate.on_power_for       or {}
-fabricate.dynamic_sources    = fabricate.dynamic_sources    or {}
+-- Count contiguous (face-adjacent) water wheels that also have water nearby.
+-- We only look in the 4 horizontal directions so "beside each other" matters.
+local HDIRS = {
+  {x= 1,y=0,z= 0}, {x=-1,y=0,z= 0},
+  {x= 0,y=0,z= 1}, {x= 0,y=0,z=-1},
+}
 
-local get_power_for = fabricate.get_power_for
-local on_power_for  = fabricate.on_power_for
+local function wheel_cluster_size(pos, limit)
+  limit = limit or 32  -- safety cap
+  local name = NS.."water_wheel"
+  local visited = {}
+  local function k(p) return ("%d,%d,%d"):format(p.x,p.y,p.z) end
+
+  local n = min.get_node_or_nil(pos)
+  if not (n and n.name == name and has_water_near_wheel(pos)) then
+    return 0
+  end
+
+  local queue = { vector.new(pos) }
+  visited[k(pos)] = true
+  local count = 0
+
+  while #queue > 0 and count < limit do
+    local cur = table.remove(queue, 1)
+    count = count + 1
+    for _,d in ipairs(HDIRS) do
+      local np = {x=cur.x+d.x, y=cur.y+d.y, z=cur.z+d.z}
+      local key = k(np)
+      if not visited[key] then
+        local nn = min.get_node_or_nil(np)
+        if nn and nn.name == name and has_water_near_wheel(np) then
+          visited[key] = true
+          queue[#queue+1] = np
+        end
+      end
+    end
+  end
+
+  return count
+end
 
 local function is_mech(name)
   local d = min.registered_nodes[name]
@@ -70,43 +111,47 @@ local function track_mech(pos)   fabricate.tracked_mech[pos_to_key(pos)] = vecto
 local function untrack_mech(pos) fabricate.tracked_mech[pos_to_key(pos)] = nil end
 
 -- -------------------------------------------------
--- Explicit compatibility rules (face-adjacent)
+-- Connectivity (face-adjacent)
 -- -------------------------------------------------
-local NAME = NS
+local W   = NS.."water_wheel"
+local G   = NS.."gantry_shaft"
+local S   = NS.."shaft"
+local X   = NS.."gearbox"
+local F1  = NS.."encased_fan"
+local F2  = NS.."encased_fan_2"
+local H   = NS.."hand_crank"
+
+local function is_fan(name) return name == F1 or name == F2 end
+
 local function can_connect(aname, bname)
   if not (is_mech(aname) and is_mech(bname)) then return false end
 
-  local W  = NAME.."water_wheel"
-  local G  = NAME.."gantry_shaft"
-  local S  = NAME.."shaft"
-  local X  = NAME.."gearbox"
-  local F  = NAME.."encased_fan"
-  local H  = NAME.."hand_crank"
+  -- Wheel hands off to gantry/shaft/fan (robust)
+  if aname == W then return (bname == G or bname == S or is_fan(bname)) end
+  if bname == W then return (aname == G or aname == S or is_fan(aname)) end
 
-    -- Wheel mates with gantry, bare shaft, or a fan
-  if aname == W then return (bname == G or bname == S or bname == F) end
-  if bname == W then return (aname == G or aname == S or aname == F) end
+  -- Gantry bridges broadly to simplify mounting
+  if aname == G or bname == G then return true end
 
-  -- Gantry bridges wheel ↔ driveline (and can pass to fan)
-  if aname == G then return (bname == W or bname == S or bname == X or bname == G or bname == F) end
-  if bname == G then return (aname == W or aname == S or aname == X or aname == G or aname == F) end
-
-  -- Crank can inject into driveline/fan/gantry
-  if aname == H then return (bname == S or bname == X or bname == G or bname == F) end
-  if bname == H then return (aname == S or aname == X or aname == G or aname == F) end
+  -- Crank injects into driveline or fans
+  if aname == H then return (bname == S or bname == X or bname == G or is_fan(bname)) end
+  if bname == H then return (aname == S or aname == X or aname == G or is_fan(aname)) end
 
   -- Shafts/gearboxes interconnect; fans can hang off them
   local A_drive = (aname == S or aname == X)
   local B_drive = (bname == S or bname == X)
   if A_drive and B_drive then return true end
-  if A_drive and bname == F then return true end
-  if B_drive and aname == F then return true end
+  if A_drive and is_fan(bname) then return true end
+  if B_drive and is_fan(aname) then return true end
+
+  -- Allow fan↔fan (so a second fan can mirror off the first)
+  if is_fan(aname) and is_fan(bname) then return true end
 
   return false
 end
 
 -- -------------------------------------------------
--- BFS power propagation (uses can_connect)
+-- BFS power propagation
 -- -------------------------------------------------
 local function add_power(accum, key, pos, p)
   local ex = accum[key]
@@ -143,7 +188,6 @@ local function bfs(accum, start_pos, base_power)
   end
 end
 
-
 -- -------------------------------------------------
 -- Globalstep: solve network + drive consumers
 -- -------------------------------------------------
@@ -164,40 +208,36 @@ min.register_globalstep(function(dtime)
       local fn = get_power_for[node.name]
       local p  = fn and (fn(pos, node, dt, now) or 0) or 0
       if p > 0 then
-        -- Ensure source itself is visible in the grid
-        add_power(accum, pos_to_key(pos), pos, p)
-        -- Then propagate
+        add_power(accum, pos_to_key(pos), pos, p) -- show source
         bfs(accum, pos, p)
       end
     end
   end
 
-  fabricate.power_grid = accum
-
--- === Terminal fan backfill ===
--- If a fan is adjacent to any powered mechanical neighbor, give it neighbor_power - 1.
-for key, pos in pairs(fabricate.tracked_mech) do
-  local n = min.get_node_or_nil(pos)
-  if n and n.name == NS.."encased_fan" then
-    local selfk = pos_to_key(pos)
-    if not accum[selfk] then
-      local best = 0
-      for _, d in ipairs(DIRS) do
-        local np = {x=pos.x+d.x, y=pos.y+d.y, z=pos.z+d.z}
-        local nn = min.get_node_or_nil(np)
-        if nn and is_mech(nn.name) and can_connect(n.name, nn.name) then
-          local ek = pos_to_key(np)
-          local e  = accum[ek]
-          if e and e.power > best then best = e.power end
+  -- === Terminal fan backfill (for both fan types) ===
+  for _, pos in pairs(fabricate.tracked_mech) do
+    local n = min.get_node_or_nil(pos)
+    if n and (n.name == F1 or n.name == F2) then
+      local selfk = pos_to_key(pos)
+      if not accum[selfk] then
+        local best = 0
+        for _, d in ipairs(DIRS) do
+          local np = {x=pos.x+d.x, y=pos.y+d.y, z=pos.z+d.z}
+          local nn = min.get_node_or_nil(np)
+          if nn and is_mech(nn.name) and can_connect(n.name, nn.name) then
+            local e = accum[pos_to_key(np)]
+            if e and e.power > best then best = e.power end
+          end
         end
-      end
-      if best > 0 then
-        local p = math.max(1, best - 1)
-        accum[selfk] = { pos = vector.new(pos), power = p }
+        if best > 0 then
+          local p = math.max(1, best - 1)
+          accum[selfk] = { pos = vector.new(pos), power = p }
+        end
       end
     end
   end
-end
+
+  fabricate.power_grid = accum
 
   -- Reset infotexts
   for _, pos in pairs(fabricate.tracked_mech) do
@@ -217,12 +257,13 @@ end
 
     if is_mech(name) then
       local label = ({
-        [NS.."water_wheel"] = "Water Wheel",
-        [NS.."gantry_shaft"]= "Gantry Shaft",
-        [NS.."shaft"]       = "Shaft",
-        [NS.."gearbox"]     = "Gearbox",
-        [NS.."hand_crank"]  = "Hand Crank",
-        [NS.."encased_fan"] = "Encased Fan",
+        [W]  = "Water Wheel",
+        [G]  = "Gantry Shaft",
+        [S]  = "Shaft",
+        [X]  = "Gearbox",
+        [H]  = "Hand Crank",
+        [F1] = "Encased Fan",
+        [F2] = "Encased Fan (2)",
       })[name] or name
       min.get_meta(pos):set_string("infotext", label.." (power "..power..")")
     end
@@ -233,7 +274,8 @@ end
   for _, pos in pairs(fabricate.tracked_mech) do
     local node = min.get_node_or_nil(pos)
     if node and is_consumer(node.name) and not accum[pos_to_key(pos)] then
-      min.get_meta(pos):set_string("infotext", "Encased Fan (no power)")
+      local label = (node.name == F2) and "Encased Fan (2)" or "Encased Fan"
+      min.get_meta(pos):set_string("infotext", label.." (no power)")
     end
   end
 end)
@@ -365,73 +407,78 @@ get_power_for[NS.."hand_crank"] = function(pos, node, dt, now)
   return 0
 end
 
--- Water Wheel (source; mesh scaled 1.25; raised selection box)
-min.register_node(NS.."water_wheel", {
-  description  = "Fabricate Water Wheel",
-  drawtype     = "mesh",
-  mesh         = "water_wheel.obj",
-  tiles        = {"mcl_core_planks_big_oak.png"},
-  paramtype    = "light",
-  paramtype2   = "facedir",
-  visual_scale = 1.25,
+-- ===================== Water Wheel (source; recentered selection box) =====================
+do
+  -- Tunables to visually center the selection box on the mesh (local space offsets)
+  local SEL_OFF_X =  0.00   -- left/right nudge
+  local SEL_OFF_Y =  0.12   -- up/down nudge (raised a bit to reach rim)
+  local SEL_OFF_Z =  0.00   -- forward/back nudge
 
-  -- Clickable area: one block wide/deep, raised to reach the visible rim
-  selection_box = { type="fixed", fixed = {{-0.5,-0.25,-0.5, 0.5,0.95,0.5}} },
-  -- Collision stays 1×1×1 so it doesn't block neighbors
-  collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
+  local SEL_HW = 0.50  -- half-width (X)
+  local SEL_HH = 0.62  -- half-height (Y)
+  local SEL_HD = 0.50  -- half-depth (Z)
 
-  groups       = { choppy=2, oddly_breakable_by_hand=2, fabricate_mech=1, fabricate_source=1 },
-  on_construct = function(pos)
-    track_mech(pos)
-    min.get_meta(pos):set_string("infotext","Water Wheel (no water)")
-  end,
-  on_destruct  = untrack_mech,
-})
+  local function make_selbox()
+    local x1 = -SEL_HW + SEL_OFF_X
+    local x2 =  SEL_HW + SEL_OFF_X
+    local y1 = -SEL_HH + SEL_OFF_Y
+    local y2 =  SEL_HH + SEL_OFF_Y
+    local z1 = -SEL_HD + SEL_OFF_Z
+    local z2 =  SEL_HD + SEL_OFF_Z
+    return { type = "fixed", fixed = {{x1,y1,z1, x2,y2,z2}} }
+  end
+
+  min.register_node(NS.."water_wheel", {
+    description  = "Fabricate Water Wheel",
+    drawtype     = "mesh",
+    mesh         = "water_wheel.obj",
+    tiles        = {"mcl_core_planks_big_oak.png"},
+    paramtype    = "light",
+    paramtype2   = "facedir",
+    visual_scale = 1.25,
+
+    selection_box = make_selbox(),
+    collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
+
+    groups       = { choppy=2, oddly_breakable_by_hand=2, fabricate_mech=1, fabricate_source=1 },
+    on_construct = function(pos)
+      track_mech(pos)
+      min.get_meta(pos):set_string("infotext","Water Wheel (no water)")
+    end,
+    on_destruct  = untrack_mech,
+  })
+
+  -- Cluster-boosted wheels: each water wheel contributes base power,
+-- and contiguous, water-fed wheels multiply the total.
+local WHEEL_BASE_POWER = 8
+local WHEEL_MAX_POWER  = 64  -- network safety cap so fans don't get absurd
 
 get_power_for[NS.."water_wheel"] = function(pos, node, dt, now)
   local m = min.get_meta(pos)
-  if has_water_near_wheel(pos) then
-    m:set_string("infotext","Water Wheel (power 8)")
-    return 8
+  if not has_water_near_wheel(pos) then
+    m:set_string("infotext","Water Wheel (no water)")
+    return 0
   end
-  m:set_string("infotext","Water Wheel (no water)")
-  return 0
+
+  -- Size of the horizontal wheel cluster that ALSO has water
+  local cluster = wheel_cluster_size(pos, 32)
+  local power = math.min(WHEEL_MAX_POWER, WHEEL_BASE_POWER * math.max(1, cluster))
+
+  m:set_string("infotext", ("Water Wheel (cluster %d → power %d)"):format(cluster, power))
+  return power
+end
 end
 
--- === Encased Fan (consumer) ===
-min.register_node(NS.."encased_fan", {
-  description = "Fabricate Encased Fan",
-  tiles = {
-    "fabricate_fan_back.png",   -- top
-    "fabricate_fan_back.png",   -- bottom
-    "fabricate_fan_casing.png", -- right
-    "fabricate_fan_casing.png", -- left
-    "fabricate_fan_casing.png", -- back
-    "fabricate_fan_front.png",  -- front (blows along facedir)
-  },
-  paramtype2   = "facedir",
-  groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
-  on_construct = function(pos)
-    track_mech(pos)
-    min.get_meta(pos):set_string("infotext","Encased Fan (no power)")
-  end,
-  on_destruct  = untrack_mech,
-})
-
--- Runs at power >= 2 (lower than before), and applies a gentle push.
-on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
+-- ===================== Encased Fans (consumers) =====================
+local function fan_on_power(pos, node, power, dt, label)
   local meta = min.get_meta(pos)
-  if power < 2 then meta:set_string("infotext","Encased Fan (no power)");
-    return
-  end
+  if power < 2 then meta:set_string("infotext", label.." (no power)"); return end
+  meta:set_string("infotext", label.." (power "..power..")")
 
-  meta:set_string("infotext","Encased Fan (power "..power..")")
-
-  -- Optional wind effect: pushes in the facedir axis.
+  -- Optional wind effect
   local dir   = facedir_to_dir(node.param2 or 0)
   local range = math.min(4 + math.floor(power/2), 12)
 
-  -- Center a bit forward so the push is mostly in front of the fan.
   local c = {
     x = pos.x + dir.x * (range * 0.5 + 0.5),
     y = pos.y + dir.y * (range * 0.5),
@@ -451,14 +498,44 @@ on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
   end
 end
 
--- Track all existing fabricate_mech nodes when a mapblock loads
+-- Fan 1
+min.register_node(F1, {
+  description = "Fabricate Encased Fan",
+  tiles = {
+    "fabricate_fan_back.png","fabricate_fan_back.png",
+    "fabricate_fan_casing.png","fabricate_fan_casing.png",
+    "fabricate_fan_casing.png","fabricate_fan_front.png",
+  },
+  paramtype2   = "facedir",
+  groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
+  on_construct = function(pos) track_mech(pos); min.get_meta(pos):set_string("infotext","Encased Fan (no power)") end,
+  on_destruct  = untrack_mech,
+})
+on_power_for[F1] = function(pos, node, power, dt) fan_on_power(pos, node, power, dt, "Encased Fan") end
+
+-- Fan 2 (identical behavior; allows a “second fan” anywhere in the chain)
+min.register_node(F2, {
+  description = "Fabricate Encased Fan (2)",
+  tiles = {
+    "fabricate_fan_back.png","fabricate_fan_back.png",
+    "fabricate_fan_casing.png","fabricate_fan_casing.png",
+    "fabricate_fan_casing.png","fabricate_fan_front.png",
+  },
+  paramtype2   = "facedir",
+  groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
+  on_construct = function(pos) track_mech(pos); min.get_meta(pos):set_string("infotext","Encased Fan (2) (no power)") end,
+  on_destruct  = untrack_mech,
+})
+on_power_for[F2] = function(pos, node, power, dt) fan_on_power(pos, node, power, dt, "Encased Fan (2)") end
+
+-- -------------------------------------------------
+-- LBM: Track all existing fabricate_mech nodes when a mapblock loads
+-- -------------------------------------------------
 min.register_lbm({
   name = NS.."track_existing_mech",
   nodenames = {"group:fabricate_mech"},
   run_at_every_load = true,
-  action = function(pos, node)
-    track_mech(pos)
-  end,
+  action = function(pos, node) track_mech(pos) end,
 })
 
 -- -------------------------------------------------
@@ -488,9 +565,14 @@ min.register_craft({ output = NS.."encased_fan", recipe = {
   {"default:steel_ingot",NS.."shaft","default:steel_ingot"},
   {"default:steel_ingot","default:copper_ingot","default:steel_ingot"},
 }})
+min.register_craft({ output = NS.."encased_fan_2", recipe = {
+  {"default:steel_ingot","default:steel_ingot","default:steel_ingot"},
+  {"default:steel_ingot",NS.."shaft","default:steel_ingot"},
+  {"default:steel_ingot","default:copper_ingot","default:steel_ingot"},
+}})
 
 -- -------------------------------------------------
--- Debug: /fab_debug
+-- Debug: /fab_debug, /fab_probe, /fab_rescan
 -- -------------------------------------------------
 min.register_chatcommand("fab_debug", {
   description = "List powered Fabricate nodes near you",
@@ -514,7 +596,6 @@ min.register_chatcommand("fab_debug", {
     return true, ""
   end
 })
-
 
 min.register_chatcommand("fab_probe", {
   description = "Show Fabricate power at the pointed node",
