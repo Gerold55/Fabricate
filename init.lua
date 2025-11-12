@@ -18,6 +18,7 @@ fabricate.power_grid      = fabricate.power_grid      or {}
 fabricate.get_power_for   = fabricate.get_power_for   or {}
 fabricate.on_power_for    = fabricate.on_power_for    or {}
 fabricate.dynamic_sources = fabricate.dynamic_sources or {}
+fabricate.belts           = fabricate.belts           or {}
 
 local get_power_for = fabricate.get_power_for
 local on_power_for  = fabricate.on_power_for
@@ -25,7 +26,9 @@ local on_power_for  = fabricate.on_power_for
 -- -------------------------------------------------
 -- Helpers
 -- -------------------------------------------------
-local function pos_to_key(p) return ("%d,%d,%d"):format(p.x,p.y,p.z) end
+local function pos_to_key(p)
+  return ("%d,%d,%d"):format(p.x,p.y,p.z)
+end
 
 local DIRS = {
   {x= 1,y= 0,z= 0},{x=-1,y= 0,z= 0},
@@ -47,14 +50,20 @@ local function facedir_to_dir(param2)
 end
 
 local function has_water_near_wheel(pos)
-  for dx=-1,1 do for dy=-1,1 do for dz=-1,1 do
-    local np = {x=pos.x+dx,y=pos.y+dy,z=pos.z+dz}
-    local n  = min.get_node_or_nil(np)
-    if n then
-      local def = min.registered_nodes[n.name]
-      if def and def.liquidtype and def.liquidtype ~= "none" then return true end
+  for dx=-1,1 do
+    for dy=-1,1 do
+      for dz=-1,1 do
+        local np = {x=pos.x+dx,y=pos.y+dy,z=pos.z+dz}
+        local n  = min.get_node_or_nil(np)
+        if n then
+          local def = min.registered_nodes[n.name]
+          if def and def.liquidtype and def.liquidtype ~= "none" then
+            return true
+          end
+        end
+      end
     end
-  end end end
+  end
   return false
 end
 
@@ -95,8 +104,12 @@ local function is_consumer(name)
   return d and d.groups and d.groups.fabricate_consumer == 1
 end
 
-local function track_mech(pos)   fabricate.tracked_mech[pos_to_key(pos)] = vector.new(pos) end
-local function untrack_mech(pos) fabricate.tracked_mech[pos_to_key(pos)] = nil end
+local function track_mech(pos)
+  fabricate.tracked_mech[pos_to_key(pos)] = vector.new(pos)
+end
+local function untrack_mech(pos)
+  fabricate.tracked_mech[pos_to_key(pos)] = nil
+end
 
 -- -------------------------------------------------
 -- Crack Overlay Entity (spritesheet: 16x80, 5 frames)
@@ -111,10 +124,14 @@ local CRACK_FRAMES = 5  -- frames indexed 0..4 (top→bottom)
 local function crack_textures_for(dir, frame)
   local crack = CRACK_SPRITE .. "^[verticalframe:"..CRACK_FRAMES..":"..frame
   -- Entity face order: top, bottom, right(+X), left(-X), back(+Z), front(-Z)
-  if     dir.x ==  1 then return {CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY}
-  elseif dir.x == -1 then return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY,CRACK_EMPTY}
-  elseif dir.z ==  1 then return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY}
-  elseif dir.z == -1 then return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack}
+  if     dir.x ==  1 then
+    return {CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY}
+  elseif dir.x == -1 then
+    return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY,CRACK_EMPTY}
+  elseif dir.z ==  1 then
+    return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY}
+  elseif dir.z == -1 then
+    return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack}
   else
     return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY}
   end
@@ -144,9 +161,12 @@ min.register_entity(NS.."crack_overlay", {
 })
 
 local function find_overlay_at(tpos)
-  for _, obj in ipairs(min.get_objects_inside_radius({x=tpos.x+0.5,y=tpos.y+0.5,z=tpos.z+0.5}, 0.6)) do
+  for _, obj in ipairs(min.get_objects_inside_radius(
+    {x=tpos.x+0.5,y=tpos.y+0.5,z=tpos.z+0.5}, 0.6)) do
     local ent = obj:get_luaentity()
-    if ent and ent.name == NS.."crack_overlay" then return obj, ent end
+    if ent and ent.name == NS.."crack_overlay" then
+      return obj, ent
+    end
   end
   return nil, nil
 end
@@ -154,10 +174,15 @@ end
 local function ensure_overlay(tpos, dir, frame)
   local obj, ent = find_overlay_at(tpos)
   if not obj then
-    obj = min.add_entity({x=tpos.x+0.5,y=tpos.y+0.5,z=tpos.z+0.5}, NS.."crack_overlay")
+    obj = min.add_entity(
+      {x=tpos.x+0.5,y=tpos.y+0.5,z=tpos.z+0.5},
+      NS.."crack_overlay"
+    )
     ent = obj and obj:get_luaentity() or nil
   end
-  if ent and ent.set_face_and_frame then ent:set_face_and_frame(dir, frame or 0) end
+  if ent and ent.set_face_and_frame then
+    ent:set_face_and_frame(dir, frame or 0)
+  end
   return obj, ent
 end
 
@@ -228,7 +253,8 @@ local function bfs(accum, start_pos, base_power)
     for _, d in ipairs(DIRS) do
       local np = {x=pos.x+d.x, y=pos.y+d.y, z=pos.z+d.z}
       local n  = min.get_node_or_nil(np)
-      if node_here and n and is_mech(n.name) and can_connect(node_here.name, n.name) then
+      if node_here and n and is_mech(n.name)
+          and can_connect(node_here.name, n.name) then
         local nkey, npwr = pos_to_key(np), pwr - 1
         if not seen[nkey] or seen[nkey] < npwr then
           seen[nkey] = npwr
@@ -308,13 +334,13 @@ min.register_globalstep(function(dtime)
 
     if is_mech(name) then
       local label = ({
-        [NS.."water_wheel"]     = "Water Wheel",
-        [NS.."gantry_shaft"]    = "Gantry Shaft",
-        [NS.."shaft"]           = "Shaft",
-        [NS.."gearbox"]         = "Gearbox",
-        [NS.."hand_crank"]      = "Hand Crank",
-        [NS.."encased_fan"]     = "Encased Fan",
-        [NS.."mechanical_drill"]= "Mechanical Drill",
+        [NS.."water_wheel"]      = "Water Wheel",
+        [NS.."gantry_shaft"]     = "Gantry Shaft",
+        [NS.."shaft"]            = "Shaft",
+        [NS.."gearbox"]          = "Gearbox",
+        [NS.."hand_crank"]       = "Hand Crank",
+        [NS.."encased_fan"]      = "Encased Fan",
+        [NS.."mechanical_drill"] = "Mechanical Drill",
       })[name] or name
       min.get_meta(pos):set_string("infotext", label.." (power "..power..")")
     end
@@ -324,7 +350,8 @@ min.register_globalstep(function(dtime)
   -- Unpowered consumers
   for _, pos in pairs(fabricate.tracked_mech) do
     local node = min.get_node_or_nil(pos)
-    if node and is_consumer(node.name) and not accum[pos_to_key(pos)] then
+    if node and is_consumer(node.name)
+        and not accum[pos_to_key(pos)] then
       local label = ({
         [NS.."encased_fan"]      = "Encased Fan",
         [NS.."mechanical_drill"] = "Mechanical Drill",
@@ -345,15 +372,22 @@ min.register_node(NS.."shaft", {
   tiles       = {"fabricate_shaft.png"},
   paramtype   = "light",
   paramtype2  = "facedir",
-  node_box    = { type="fixed", fixed = { {-0.1,-0.1,-0.5, 0.1,0.1,0.5} } }, -- rod along Z
+  node_box    = {
+    type="fixed",
+    fixed = { {-0.1,-0.1,-0.5, 0.1,0.1,0.5} }, -- rod along Z
+  },
   groups      = { cracky=2, oddly_breakable_by_hand=2, fabricate_mech=1 },
   on_construct= track_mech,
   on_destruct = untrack_mech,
 
   on_place = function(itemstack, placer, pt)
-    if pt.type ~= "node" then return min.item_place(itemstack, placer, pt) end
+    if pt.type ~= "node" then
+      return min.item_place(itemstack, placer, pt)
+    end
     local under, above = pt.under, pt.above
-    if not under or not above then return min.item_place(itemstack, placer, pt) end
+    if not under or not above then
+      return min.item_place(itemstack, placer, pt)
+    end
     local dx, dz = under.x - above.x, under.z - above.z
     local param2 = (math.abs(dx) > math.abs(dz)) and 1 or 0 -- X vs Z
     return min.item_place_node(itemstack, placer, pt, param2)
@@ -395,9 +429,13 @@ min.register_node(NS.."gantry_shaft", {
   on_construct= track_mech,
   on_destruct = untrack_mech,
   on_place = function(itemstack, placer, pt)
-    if pt.type ~= "node" then return min.item_place(itemstack, placer, pt) end
+    if pt.type ~= "node" then
+      return min.item_place(itemstack, placer, pt)
+    end
     local under, above = pt.under, pt.above
-    if not under or not above then return min.item_place(itemstack, placer, pt) end
+    if not under or not above then
+      return min.item_place(itemstack, placer, pt)
+    end
     local dx, dz = under.x - above.x, under.z - above.z
     local param2
     if math.abs(dx) > math.abs(dz) then
@@ -428,7 +466,10 @@ min.register_node(NS.."hand_crank", {
       {0.05, 0.1,-0.15,  0.35,0.2,0.15},
     },
   },
-  groups       = { choppy=2, oddly_breakable_by_hand=2, fabricate_mech=1, fabricate_source=1 },
+  groups       = {
+    choppy=2, oddly_breakable_by_hand=2,
+    fabricate_mech=1, fabricate_source=1
+  },
   on_construct = function(pos)
     track_mech(pos)
     min.get_meta(pos):set_string("infotext","Hand Crank")
@@ -476,8 +517,12 @@ do
     paramtype2   = "facedir",
     visual_scale = 1.25,
     selection_box = make_selbox(),
-    collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
-    groups       = { choppy=2, oddly_breakable_by_hand=2, fabricate_mech=1, fabricate_source=1 },
+    collision_box = { type="fixed",
+      fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
+    groups       = {
+      choppy=2, oddly_breakable_by_hand=2,
+      fabricate_mech=1, fabricate_source=1
+    },
     on_construct = function(pos)
       track_mech(pos)
       min.get_meta(pos):set_string("infotext","Water Wheel (no water)")
@@ -494,8 +539,13 @@ do
       return 0
     end
     local cluster = wheel_cluster_size(pos, 32)
-    local power = math.min(WHEEL_MAX_POWER, WHEEL_BASE_POWER * math.max(1, cluster))
-    m:set_string("infotext", ("Water Wheel (cluster %d → power %d)"):format(cluster, power))
+    local power = math.min(
+      WHEEL_MAX_POWER,
+      WHEEL_BASE_POWER * math.max(1, cluster)
+    )
+    m:set_string("infotext",
+      ("Water Wheel (cluster %d → power %d)")
+        :format(cluster, power))
     return power
   end
 end
@@ -522,7 +572,10 @@ min.register_node(NS.."encased_fan", {
 
 on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
   local meta = min.get_meta(pos)
-  if power < 2 then meta:set_string("infotext","Encased Fan (no power)"); return end
+  if power < 2 then
+    meta:set_string("infotext","Encased Fan (no power)")
+    return
+  end
   meta:set_string("infotext","Encased Fan (power "..power..")")
 
   local dir   = facedir_to_dir(node.param2 or 0)
@@ -536,7 +589,11 @@ on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
     if obj:is_player() or obj:get_luaentity() then
       local v = obj:get_velocity() or {x=0,y=0,z=0}
       local boost = (power/8)*4
-      obj:set_velocity({ x=v.x+dir.x*boost, y=v.y+(dir.y*boost*0.2), z=v.z+dir.z*boost })
+      obj:set_velocity({
+        x = v.x + dir.x * boost,
+        y = v.y + (dir.y * boost * 0.2),
+        z = v.z + dir.z * boost,
+      })
     end
   end
 end
@@ -562,8 +619,10 @@ min.register_node(NS.."mechanical_drill", {
       {-0.10,-0.10, 0.10,  0.10, 0.10, 0.55}, -- bit
     },
   },
-  selection_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
-  collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
+  selection_box = { type="fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
+  collision_box = { type="fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
   groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
   on_construct = function(pos)
     track_mech(pos)
@@ -624,7 +683,9 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
 
   local tname = tnode.name
   local def   = min.registered_nodes[tname]
-  if (not def) or tname=="air" or (def.liquidtype and def.liquidtype~="none") or def.walkable==false then
+  if (not def) or tname=="air"
+      or (def.liquidtype and def.liquidtype~="none")
+      or def.walkable==false then
     meta:set_string("infotext","Mechanical Drill (idle)")
     meta:set_float("drill_progress", 0.0)
     remove_overlay(tpos)
@@ -652,8 +713,10 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
   local speed = (power / 8) * 1.2 -- 8 power ~ 1.2 hardness/sec
   prog = prog + speed * dt
 
-  -- frame 0..(CRACK_FRAMES-1) from progress
-  local frame = math.min(CRACK_FRAMES-1, math.floor((prog / hardness) * CRACK_FRAMES))
+  local frame = math.min(
+    CRACK_FRAMES-1,
+    math.floor((prog / hardness) * CRACK_FRAMES)
+  )
   local last  = meta:get_int("drill_stage")
   if frame ~= last then
     ensure_overlay(tpos, dir, frame)
@@ -671,7 +734,11 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
   end
 
   meta:set_float("drill_progress", prog)
-  meta:set_string("infotext", ("Mechanical Drill (power %d, %.0f%%)"):format(power, (prog / hardness) * 100))
+  meta:set_string(
+    "infotext",
+    ("Mechanical Drill (power %d, %.0f%%)")
+      :format(power, (prog / hardness) * 100)
+  )
 end
 
 -- -------------------------------------------------
@@ -685,10 +752,12 @@ min.register_lbm({
 })
 
 -- -------------------------------------------------
--- Crafting
+-- Crafting (core parts)
 -- -------------------------------------------------
 min.register_craft({ output = NS.."shaft 4", recipe = {
-  {"default:steel_ingot"}, {"default:stick"}, {"default:steel_ingot"},
+  {"default:steel_ingot"},
+  {"default:stick"},
+  {"default:steel_ingot"},
 }})
 min.register_craft({ output = NS.."gearbox", recipe = {
   {"default:steel_ingot", NS.."shaft", "default:steel_ingot"},
@@ -699,7 +768,9 @@ min.register_craft({ output = NS.."gantry_shaft 2", recipe = {
   {NS.."shaft","group:wood",NS.."shaft"},
 }})
 min.register_craft({ output = NS.."hand_crank", recipe = {
-  {"group:wood"},{"default:stick"},{"default:stick"},
+  {"group:wood"},
+  {"default:stick"},
+  {"default:stick"},
 }})
 min.register_craft({ output = NS.."water_wheel", recipe = {
   {"group:wood","group:wood","group:wood"},
@@ -718,10 +789,10 @@ min.register_craft({ output = NS.."mechanical_drill", recipe = {
 }})
 
 -- ======================================================================
--- Create-like 2-Pulley Conveyor Belts
+-- Create-like Shafts + Mechanical Belts (no pulley blocks)
 -- ======================================================================
 
--- -------- Tunables -----------------------------------------------------
+-- ---- Tunables ----------------------------------------------------------
 local BELT_MIN_POWER   = 2
 local BELT_BASE_SPEED  = 1.6   -- m/s at min power
 local BELT_SPEED_GAIN  = 0.25  -- m/s per extra power
@@ -736,73 +807,38 @@ local function belt_speed_for_power(p)
   return (s > BELT_SPEED_MAX) and BELT_SPEED_MAX or s
 end
 
--- -------- Runtime registry ---------------------------------------------
-fabricate.belts = fabricate.belts or {}   -- line_id -> {segments={pos...}, axis="x"/"z", dir=±1, slope=0/±1, speed=0}
+-- line_id -> {segments={pos...}, axis="x"/"z", dir=±1, slope=0/±1, speed=0, anchors={a={pos,normal},b={...}}}
 local BELT_COUNTER = 0
 local function new_line_id()
   BELT_COUNTER = BELT_COUNTER + 1
   return "belt_"..min.get_gametime().."_"..BELT_COUNTER
 end
 
--- -------- Nodes: pulleys & segments ------------------------------------
-
--- Segment nodeboxes (flat and slope “step”)
+-- Shared segment nodeboxes
 local BELT_FLAT_BOX = {
   type="fixed",
   fixed={
-    {-0.5, -0.5, -0.5,  0.5, -0.375, 0.5},
-    {-0.5, -0.375,-0.5,  0.5, -0.345, 0.5},
+    {-0.5,-0.5,-0.5,  0.5,-0.375,0.5},
+    {-0.5,-0.375,-0.5,0.5,-0.345,0.5},
   }
 }
 local BELT_STEP_BOX = {
   type="fixed",
   fixed={
-    {-0.5, -0.5, -0.5,  0.5, -0.375, 0.5}, -- base
-    {-0.5, -0.375,-0.5,  0.5, -0.312, 0.5}, -- slightly higher “ramp”
+    {-0.5,-0.5,-0.5,  0.5,-0.375,0.5},
+    {-0.5,-0.375,-0.5,0.5,-0.312,0.5},
   }
 }
 
--- Pulley (drive/endpoints)
-min.register_node(NS.."belt_pulley", {
-  description = "Fabricate Belt Pulley",
-  tiles = {
-    "mcl_core_iron_block.png","mcl_core_iron_block.png",
-    "mcl_core_iron_block.png","mcl_core_iron_block.png",
-    "mcl_core_iron_block.png","mcl_core_iron_block.png",
-  },
-  paramtype2   = "facedir",
-  groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
-  on_construct = function(pos)
-    track_mech(pos)
-    min.get_meta(pos):set_string("infotext","Pulley (no belt)")
-  end,
-  on_destruct  = function(pos)
-    -- If this pulley anchors a belt, tear the belt down.
-    local m   = min.get_meta(pos)
-    local lid = m:get_string("belt_line_id")
-    if lid ~= "" then
-      local line = fabricate.belts[lid]
-      if line then
-        for _,sp in ipairs(line.segments) do
-          local n = min.get_node_or_nil(sp)
-          if n and (n.name == NS.."belt_segment" or n.name == NS.."belt_segment_slope") then
-            min.remove_node(sp)
-          end
-        end
-        fabricate.belts[lid] = nil
-      end
-    end
-    untrack_mech(pos)
-  end,
-})
-
--- Flat segment
+-- Virtual belt segments
 min.register_node(NS.."belt_segment", {
-  description = "Fabricate Belt Segment (Flat)",
+  description = "Belt Segment (Flat)",
   drawtype    = "nodebox",
   node_box    = BELT_FLAT_BOX,
-  selection_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.345,0.5}} },
-  collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.375,0.5}} },
+  selection_box = { type="fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,-0.345,0.5}} },
+  collision_box = { type="fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,-0.375,0.5}} },
   tiles       = {
     "mcl_core_iron_block.png^[colorize:#3a3a3a:180",
     "mcl_core_iron_block.png^[colorize:#1e1e1e:200",
@@ -812,18 +848,19 @@ min.register_node(NS.."belt_segment", {
     "mcl_core_iron_block.png^[colorize:#2c2c2c:200",
   },
   paramtype   = "light",
-  paramtype2  = "facedir", -- axis/orientation
+  paramtype2  = "facedir",
   groups      = { cracky=2, not_in_creative_inventory=1 },
-  drop        = "", -- segments are virtual; breaking pulleys returns belts
+  drop        = "",
 })
 
--- Slope “step” segment
 min.register_node(NS.."belt_segment_slope", {
-  description = "Fabricate Belt Segment (Slope)",
+  description = "Belt Segment (Slope)",
   drawtype    = "nodebox",
   node_box    = BELT_STEP_BOX,
-  selection_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.312,0.5}} },
-  collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,-0.375,0.5}} },
+  selection_box = { type="fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,-0.312,0.5}} },
+  collision_box = { type="fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,-0.375,0.5}} },
   tiles       = {
     "mcl_core_iron_block.png^[colorize:#3a3a3a:160",
     "mcl_core_iron_block.png^[colorize:#1e1e1e:200",
@@ -838,161 +875,273 @@ min.register_node(NS.."belt_segment_slope", {
   drop        = "",
 })
 
--- Belts get power via pulleys: show speed in infotext. Movement happens in belt step.
-on_power_for[NS.."belt_pulley"] = function(pos, node, power, dt)
-  local m   = min.get_meta(pos)
-  local lid = m:get_string("belt_line_id")
-  local speed = belt_speed_for_power(power)
-  if lid ~= "" then
-    local line = fabricate.belts[lid]
-    if line then line.speed = math.max(line.speed, speed) end -- either end can drive; take max
-    m:set_string("infotext", ("Pulley (belt %s) speed %.2f m/s"):format(lid, speed))
+-- ========= Create-like belt linker (no pulley blocks, shafts must face same dir) =========
+
+local BELT_MAX_LEN = 128   -- hard cap like Create
+
+local function is_driveline(name)
+  return name == NS.."shaft" or name == NS.."gearbox" or name == NS.."gantry_shaft"
+end
+
+-- Normal of the clicked face (horizontal only)
+local function pointed_normal(pt)
+  if not pt or pt.type ~= "node" or not pt.under or not pt.above then return nil end
+  local n = {
+    x = pt.under.x - pt.above.x,
+    y = pt.under.y - pt.above.y,
+    z = pt.under.z - pt.above.z,
+  }
+  if n.y ~= 0 then return nil end
+  if math.abs(n.x) + math.abs(n.z) ~= 1 then return nil end
+  return n
+end
+
+-- For shafts we only allow belts on the side faces perpendicular to the rod axis.
+-- Shaft param2: 0 => rod along Z, 1 => rod along X (your node)
+local function shaft_face_ok(node, face_normal)
+  if node.name ~= NS.."shaft" then
+    -- gearboxes / gantries: any horizontal side is allowed
+    return face_normal.y == 0
+  end
+  local alongX = (node.param2 or 0) % 4 == 1
+  if alongX then
+    -- rod along ±X ⇒ valid faces are ±Z
+    return face_normal.x == 0 and face_normal.z ~= 0
   else
-    m:set_string("infotext", (speed>0) and ("Pulley (no belt) speed %.2f m/s"):format(speed) or "Pulley (no belt)")
+    -- rod along ±Z ⇒ valid faces are ±X
+    return face_normal.z == 0 and face_normal.x ~= 0
   end
 end
 
--- -------- Belt building tool (spool) -----------------------------------
-min.register_craftitem(NS.."belt_spool", {
-  description = "Fabricate Belt Spool",
+local function axis_of(a, b)
+  if a.x == b.x and a.z ~= b.z then return "z" end
+  if a.z == b.z and a.x ~= b.x then return "x" end
+  return nil
+end
+
+local function dir_1d(a, b, axis)
+  if axis == "x" then return (b.x > a.x) and 1 or -1 end
+  if axis == "z" then return (b.z > a.z) and 1 or -1 end
+  return 0
+end
+
+-- Build straight / slope belt run, returns lid or nil,err
+local function build_belt_run(user, a_pos, a_norm, b_pos, b_norm)
+  -- 1) Both anchors must be driveline nodes
+  local an = min.get_node_or_nil(a_pos)
+  local bn = min.get_node_or_nil(b_pos)
+  if not (an and bn and is_driveline(an.name) and is_driveline(bn.name)) then
+    return nil, "Anchors must be shafts, gearboxes, or gantries."
+  end
+
+  -- 2) Normals must be horizontal and identical (Create rule)
+  if not a_norm or not b_norm then
+    return nil, "Click horizontal side faces."
+  end
+  if a_norm.y ~= 0 or b_norm.y ~= 0 then
+    return nil, "Click horizontal side faces."
+  end
+  if a_norm.x ~= b_norm.x or a_norm.z ~= b_norm.z then
+    return nil, "Both shafts must face the same direction."
+  end
+
+  -- 3) Face must be valid for the shaft / gearbox
+  if not shaft_face_ok(an, a_norm) then
+    return nil, "Invalid face on first shaft for a belt."
+  end
+  if not shaft_face_ok(bn, b_norm) then
+    return nil, "Invalid face on second shaft for a belt."
+  end
+
+  -- 4) Anchors must align on X or Z (no corners)
+  local ax = axis_of(a_pos, b_pos)
+  if not ax then
+    return nil, "Anchors must align on X or Z."
+  end
+
+  -- 5) Belt direction / length
+  local dir   = dir_1d(a_pos, b_pos, ax)
+  local steps = (ax == "x")
+    and math.abs(b_pos.x - a_pos.x)
+    or  math.abs(b_pos.z - a_pos.z)
+  local dy    = b_pos.y - a_pos.y
+  if steps == 0 and dy == 0 then
+    return nil, "Anchors overlap."
+  end
+  if steps + math.abs(dy) > BELT_MAX_LEN then
+    return nil, "Belt is too long."
+  end
+
+  -- 6) Normals must be perpendicular to belt axis (side-mounted belt)
+  if ax == "x" then
+    -- Belt runs along X => normals must be ±Z
+    if a_norm.x ~= 0 or math.abs(a_norm.z) ~= 1 then
+      return nil, "Faces must be perpendicular to the belt (±Z for X-belts)."
+    end
+  else -- "z"
+    -- Belt runs along Z => normals must be ±X
+    if a_norm.z ~= 0 or math.abs(a_norm.x) ~= 1 then
+      return nil, "Faces must be perpendicular to the belt (±X for Z-belts)."
+    end
+  end
+
+  -- 7) Lay belt segments (flat + slopes)
+  local lid = new_line_id()
+  fabricate.belts[lid] = {
+    segments = {},
+    axis     = ax,
+    dir      = dir,
+    slope    = (dy == 0) and 0 or ((dy > 0) and 1 or -1),
+    speed    = 0,
+    anchors  = {
+      a = { pos = vector.new(a_pos), normal = vector.new(a_norm) },
+      b = { pos = vector.new(b_pos), normal = vector.new(b_norm) },
+    },
+  }
+
+  local facedir = (ax == "x")
+    and ((dir == 1) and 1 or 3)
+    or  ((dir == 1) and 0 or 2)
+  local cx, cy, cz = a_pos.x, a_pos.y, a_pos.z
+  local ax_step     = (dir == 1) and 1 or -1
+  local remain_y    = dy
+
+  local function place_seg(p, name)
+    local nn = min.get_node_or_nil(p)
+    if nn and nn.name ~= "air"
+        and nn.name ~= NS.."belt_segment"
+        and nn.name ~= NS.."belt_segment_slope" then
+      return false, "Path blocked at "..min.pos_to_string(p)
+    end
+    min.set_node(p, { name = name, param2 = facedir })
+    local pp = { x = p.x, y = p.y + 0.05, z = p.z } -- lifted “visual” segment
+    min.set_node(pp, { name = name, param2 = facedir })
+    table.insert(fabricate.belts[lid].segments, vector.new(pp))
+    return true
+  end
+
+  for i = 1, steps do
+    if remain_y ~= 0 then
+      cy = cy + ((remain_y > 0) and 1 or -1)
+      local okp, errp =
+        place_seg({ x = cx, y = cy, z = cz }, NS.."belt_segment_slope")
+      if not okp then fabricate.belts[lid] = nil; return nil, errp end
+      remain_y = (remain_y > 0) and (remain_y - 1) or (remain_y + 1)
+    else
+      local okp, errp =
+        place_seg({ x = cx, y = cy, z = cz }, NS.."belt_segment")
+      if not okp then fabricate.belts[lid] = nil; return nil, errp end
+    end
+    if ax == "x" then cx = cx + ax_step else cz = cz + ax_step end
+  end
+
+  while remain_y ~= 0 do
+    cy = cy + ((remain_y > 0) and 1 or -1)
+    local okp, errp =
+      place_seg({ x = cx, y = cy, z = cz }, NS.."belt_segment_slope")
+    if not okp then fabricate.belts[lid] = nil; return nil, errp end
+    remain_y = (remain_y > 0) and (remain_y - 1) or (remain_y + 1)
+  end
+
+  return lid
+end
+
+-- Player tool: click driveline face A then face B
+min.register_craftitem(NS.."belt_linker", {
+  description = "Fabricate Belt Linker",
   inventory_image = "mcl_core_iron_block.png^[colorize:#3a3a3a:150",
   on_use = function(stack, user, pointed)
-    if not user or not pointed or pointed.type ~= "node" then return stack end
-    local pos = pointed.under
-    local n   = min.get_node_or_nil(pos)
-    if not n or n.name ~= NS.."belt_pulley" then
-      min.chat_send_player(user:get_player_name(), "Click a belt pulley.")
+    if not user or not pointed or pointed.type ~= "node" then
       return stack
     end
-    local meta = user:get_meta()
-    local stored = meta:get_string("fab_spool_first")
-    if stored == "" then
-      meta:set_string("fab_spool_first", min.pos_to_string(pos))
-      min.chat_send_player(user:get_player_name(), "First pulley set. Click the second pulley.")
+    local pos  = pointed.under
+    local node = min.get_node_or_nil(pos)
+    if not node or not is_driveline(node.name) then
+      min.chat_send_player(user:get_player_name(),
+        "Click a shaft/gearbox/gantry face.")
       return stack
     end
-    local p1 = min.string_to_pos(stored)
-    meta:set_string("fab_spool_first","")
-    if not p1 then return stack end
-    -- Build between p1 and pos
-    local ok, err = (function(a,b)
-      -- Same axis X or Z only (like Create). Y may differ.
-      if a.x ~= b.x and a.z ~= b.z then
-        return false, "Pulleys must align on X or Z."
-      end
-      -- Determine axis/dir
-      local axis, dir, len
-      if a.x == b.x then axis="z"; dir = (b.z > a.z) and 1 or -1; len = math.abs(b.z - a.z)
-      else               axis="x"; dir = (b.x > a.x) and 1 or -1; len = math.abs(b.x - a.x) end
-      local dy = b.y - a.y
-      -- Refuse zero-length
-      if len == 0 and dy == 0 then return false, "Pulleys overlap." end
 
-      -- Reserve a line id and write to both pulleys
-      local lid = new_line_id()
-      fabricate.belts[lid] = {segments={}, axis=axis, dir=dir, slope=(dy==0) and 0 or ((dy>0) and 1 or -1), speed=0}
+    local norm = pointed_normal(pointed)
+    if not norm then
+      min.chat_send_player(user:get_player_name(),
+        "Click a horizontal side face.")
+      return stack
+    end
+    if not shaft_face_ok(node, norm) then
+      min.chat_send_player(user:get_player_name(),
+        "That face is not valid for a belt on this shaft.")
+      return stack
+    end
 
-      min.get_meta(a):set_string("belt_line_id", lid)
-      min.get_meta(b):set_string("belt_line_id", lid)
+    local um      = user:get_meta()
+    local a_pos_s = um:get_string("fab_link_a_pos")
+    if a_pos_s == "" then
+      um:set_string("fab_link_a_pos",  min.pos_to_string(pos))
+      um:set_string("fab_link_a_norm", min.serialize(norm))
+      min.chat_send_player(user:get_player_name(),
+        "First anchor set. Click the second shaft with the belt linker.")
+      return stack
+    end
 
-      -- Lay segments from a → b. We stair-step Y until we match dy, then run flat.
-      local sx = a.x; local sy = a.y; local sz = a.z
-      local ex = b.x; local ey = b.y; local ez = b.z
+    -- second click
+    local a_pos  = min.string_to_pos(a_pos_s)
+    local a_norm = min.deserialize(
+      um:get_string("fab_link_a_norm") or ""
+    ) or { x = 0, y = 0, z = 1 }
 
-      local step_axis = (axis=="x") and "x" or "z"
-      local total_steps = (axis=="x") and math.abs(ex - sx) or math.abs(ez - sz)
-      local remaining_y = dy
+    um:set_string("fab_link_a_pos",  "")
+    um:set_string("fab_link_a_norm", "")
 
-      local place_seg = function(p, nodename, param2)
-        -- refuse to overwrite non-air
-        local nn = min.get_node_or_nil(p)
-        if nn and nn.name ~= "air" and nn.name ~= NS.."belt_segment" and nn.name ~= NS.."belt_segment_slope" then
-          return false, "Path blocked at "..min.pos_to_string(p)
-        end
-        min.set_node(p, {name=nodename, param2=param2})
-        table.insert(fabricate.belts[lid].segments, vector.new(p))
-        return true
-      end
-
-      local facedir = (axis=="x") and ((dir==1) and 1 or 3) or ((dir==1) and 0 or 2) -- shaft-like
-
-      local cx,cy,cz = sx, sy, sz
-      local ax_step = (dir==1) and 1 or -1
-      for i=1,total_steps do
-        -- slope first if we still need vertical travel
-        if remaining_y ~= 0 then
-          local slope_dir = (remaining_y>0) and 1 or -1
-          cy = cy + slope_dir
-          local okp, errp = place_seg({x=cx,y=cy,z=cz}, NS.."belt_segment_slope", facedir)
-          if not okp then fabricate.belts[lid]=nil; return false, errp end
-          remaining_y = remaining_y - slope_dir
-        else
-          local okp, errp = place_seg({x=cx,y=cy,z=cz}, NS.."belt_segment", facedir)
-          if not okp then fabricate.belts[lid]=nil; return false, errp end
-        end
-        if step_axis=="x" then cx = cx + ax_step else cz = cz + ax_step end
-      end
-
-      -- if we still have Y left after horizontal (shouldn’t happen), climb it
-      while remaining_y ~= 0 do
-        local slope_dir = (remaining_y>0) and 1 or -1
-        cy = cy + slope_dir
-        local okp, errp = place_seg({x=cx,y=cy,z=cz}, NS.."belt_segment_slope", facedir)
-        if not okp then fabricate.belts[lid]=nil; return false, errp end
-        remaining_y = remaining_y - slope_dir
-      end
-
-      min.chat_send_player(user:get_player_name(), "Belt built: "..lid)
-      return true
-    end)(p1, pos)
-
-    if not ok then
-      min.chat_send_player(user:get_player_name(), "Belt failed: "..(err or "?"))
+    local lid, err = build_belt_run(user, a_pos, a_norm, pos, norm)
+    if not lid then
+      min.chat_send_player(user:get_player_name(),
+        "Belt failed: "..(err or "?"))
+    else
+      min.chat_send_player(user:get_player_name(), "Belt built.")
     end
     return stack
-  end
+  end,
 })
 
--- Allow removing belts by punching a segment (drops the spool back)
-min.register_on_punchnode(function(pos, node, puncher, pointed_thing)
-  if node.name ~= NS.."belt_segment" and node.name ~= NS.."belt_segment_slope" then return end
-  -- Find line id by scanning pulleys around the run (cheap: look 8 blocks around)
-  local removed = false
-  local around = min.find_nodes_in_area(
-    {x=pos.x-8,y=pos.y-8,z=pos.z-8},
-    {x=pos.x+8,y=pos.y+8,z=pos.z+8},
-    {NS.."belt_pulley"}
-  )
-  for _,pp in ipairs(around or {}) do
-    local lid = min.get_meta(pp):get_string("belt_line_id")
-    if lid ~= "" then
-      local line = fabricate.belts[lid]
-      if line then
-        for _,sp in ipairs(line.segments) do
-          local n = min.get_node_or_nil(sp)
-          if n and (n.name == NS.."belt_segment" or n.name == NS.."belt_segment_slope") then
-            min.remove_node(sp)
+min.register_craft({
+  output = NS.."belt_linker",
+  recipe = {
+    {"group:wool","group:wool","group:wool"},
+    {"","default:steel_ingot",""},
+    {"group:wool","group:wool","group:wool"},
+  }
+})
+
+-- Remove whole belt by punching any segment
+min.register_on_punchnode(function(pos, node, puncher, pt)
+  if node.name ~= NS.."belt_segment"
+      and node.name ~= NS.."belt_segment_slope" then
+    return
+  end
+
+  for lid, line in pairs(fabricate.belts or {}) do
+    for _, sp in ipairs(line.segments or {}) do
+      if sp.x == pos.x and sp.y == pos.y and sp.z == pos.z then
+        -- This line owns the punched segment → remove all its segments
+        for _, sp2 in ipairs(line.segments or {}) do
+          local n2 = min.get_node_or_nil(sp2)
+          if n2 and (n2.name == NS.."belt_segment"
+                  or n2.name == NS.."belt_segment_slope") then
+            min.remove_node(sp2)
           end
         end
-        fabricate.belts[lid]=nil
-        -- clear pulleys that referenced it
-        for _,pp2 in ipairs(around) do
-          if min.get_meta(pp2):get_string("belt_line_id")==lid then
-            min.get_meta(pp2):set_string("belt_line_id","")
-            min.get_meta(pp2):set_string("infotext","Pulley (no belt)")
-          end
+        fabricate.belts[lid] = nil
+        if puncher and puncher:is_player() then
+          min.chat_send_player(puncher:get_player_name(), "Belt removed.")
         end
-        removed = true
-        break
+        return
       end
     end
-  end
-  if removed and puncher then
-    min.chat_send_player(puncher:get_player_name(), "Belt removed.")
   end
 end)
 
--- -------- Movement step (items & actors) --------------------------------
+-- ---- Movement step (entities & items) ----------------------------------
 local belt_step_accum = 0
 min.register_globalstep(function(dtime)
   belt_step_accum = belt_step_accum + dtime
@@ -1000,39 +1149,54 @@ min.register_globalstep(function(dtime)
   local dt = belt_step_accum
   belt_step_accum = 0
 
-  -- Reset all lines’ computed speed for this tick
-  for _,line in pairs(fabricate.belts) do line.speed = 0 end
-
-  -- Read speed from power at any segment’s tile (via either pulley hook already ran),
-  -- plus directly from grid at segments (in case solver put power on them later)
-  for lid, line in pairs(fabricate.belts) do
-    -- If pulleys updated speed via on_power_for, keep it; otherwise compute from local grid
-    if (line.speed or 0) <= 0 then
-      local best = 0
-      for _,p in ipairs(line.segments) do
-        local e = fabricate.power_grid[pos_to_key(p)]
-        if e and e.power and e.power > best then best = e.power end
-      end
-      line.speed = belt_speed_for_power(best)
-    end
+  -- Reset computed speeds
+  for _, line in pairs(fabricate.belts or {}) do
+    line.speed = 0
   end
 
-  -- Move things on each segment
-  for lid, line in pairs(fabricate.belts) do
+  -- Compute speed from anchor shaft power
+  for lid, line in pairs(fabricate.belts or {}) do
+    local best = 0
+    if line.anchors then
+      local a = line.anchors.a and line.anchors.a.pos
+      local b = line.anchors.b and line.anchors.b.pos
+      if a then
+        local ea = fabricate.power_grid[pos_to_key(a)]
+        if ea and ea.power and ea.power > best then best = ea.power end
+      end
+      if b then
+        local eb = fabricate.power_grid[pos_to_key(b)]
+        if eb and eb.power and eb.power > best then best = eb.power end
+      end
+    end
+    line.speed = belt_speed_for_power(best)
+  end
+
+  -- Move riders
+  for lid, line in pairs(fabricate.belts or {}) do
     local spd = line.speed or 0
     if spd <= 0 then goto nextline end
+    local dir = (line.axis=="x")
+      and {x=line.dir,y=0,z=0}
+      or  {x=0,y=0,z=line.dir}
+    local perp = (line.axis=="x")
+      and {x=0,y=0,z=1}
+      or  {x=1,y=0,z=0}
+    local ybias = (line.slope==0) and 0 or (line.slope * 0.5)
 
-    -- forward vector from axis/dir
-    local dir = (line.axis=="x") and {x=line.dir,y=0,z=0} or {x=0,y=0,z=line.dir}
-    -- perpendicular for centering
-    local perp = (line.axis=="x") and {x=0,y=0,z=1} or {x=1,y=0,z=0}
-    local ybias = (line.slope==0) and 0 or (line.slope * 0.5) -- gentle lift on slopes
-
-    for _, segpos in ipairs(line.segments) do
-      local scan_center = {x = segpos.x + 0.5, y = segpos.y + BELT_PICKUP_Y, z = segpos.z + 0.5}
-      for _, obj in ipairs(min.get_objects_inside_radius(scan_center, 0.8)) do
+    for _, segpos in ipairs(line.segments or {}) do
+      local scan_center = {
+        x = segpos.x + 0.5,
+        y = segpos.y + BELT_PICKUP_Y,
+        z = segpos.z + 0.5,
+      }
+      for _, obj in ipairs(
+        min.get_objects_inside_radius(scan_center, 0.8)
+      ) do
         local ent = obj:get_luaentity()
-        if ent and ent.name and ent.name:find("^"..NS) then goto nextobj end
+        if ent and ent.name and ent.name:find("^"..NS) then
+          goto nextobj
+        end -- ignore our helpers
 
         local p = obj:get_pos(); if not p then goto nextobj end
         if math.abs(p.y - (segpos.y + 0.525)) < 0.35 then
@@ -1042,48 +1206,35 @@ min.register_globalstep(function(dtime)
           v.x = v.x + dir.x * spd * dt * 8
           v.z = v.z + dir.z * spd * dt * 8
 
-          -- Up/down bias on slopes to keep things seated
-          v.y = (obj:is_player() and v.y) or math.min(v.y + ybias * dt, 1.0)
+          -- Keep seated on slopes
+          v.y = (obj:is_player() and v.y)
+            or math.min(v.y + ybias * dt, 1.0)
 
-          -- Centering
-          local off = { x = (p.x - (segpos.x + 0.5)), z = (p.z - (segpos.z + 0.5)) }
-          local lateral = off.x * perp.x + off.z * perp.z
+          -- Centering toward belt middle
+          local offx = (p.x - (segpos.x + 0.5))
+          local offz = (p.z - (segpos.z + 0.5))
+          local lateral = offx * perp.x + offz * perp.z
           v.x = v.x - perp.x * lateral * BELT_CENTER_PULL * dt
           v.z = v.z - perp.z * lateral * BELT_CENTER_PULL * dt
 
-          -- Friction
+          -- Mild friction
           v.x = v.x * (1 - BELT_FRICTION * dt)
           v.z = v.z * (1 - BELT_FRICTION * dt)
 
           obj:set_velocity(v)
 
           -- Keep items from sinking
-          if not obj:is_player() and p.y < segpos.y + 0.45 then
+          if not obj:is_player()
+              and p.y < segpos.y + 0.45 then
             obj:set_pos({x=p.x, y=segpos.y + 0.46, z=p.z})
           end
         end
         ::nextobj::
       end
     end
-
     ::nextline::
   end
 end)
-
--- -------- Crafting ------------------------------------------------------
-min.register_craft({
-  output = NS.."belt_pulley 2",
-  recipe = {
-    {"default:steel_ingot", NS.."shaft",          "default:steel_ingot"},
-    {"default:steel_ingot","default:copper_ingot","default:steel_ingot"},
-    {"default:steel_ingot", NS.."shaft",          "default:steel_ingot"},
-  }
-})
-min.register_craft({ output = NS.."belt_spool",
-  recipe = { {"group:wool","group:wool","group:wool"},
-             {"","default:steel_ingot",""},
-             {"group:wool","group:wool","group:wool"} }
-})
 
 -- -------------------------------------------------
 -- Debug commands
@@ -1098,15 +1249,23 @@ min.register_chatcommand("fab_debug", {
     local out = {}
     for _, data in pairs(fabricate.power_grid) do
       local pos = data.pos
-      if math.abs(pos.x-p.x)<=r and math.abs(pos.y-p.y)<=r and math.abs(pos.z-p.z)<=r then
+      if math.abs(pos.x-p.x)<=r
+          and math.abs(pos.y-p.y)<=r
+          and math.abs(pos.z-p.z)<=r then
         local n = min.get_node_or_nil(pos)
-        out[#out+1] = ("%s @ %d,%d,%d = %d"):format(n and n.name or "?", pos.x, pos.y, pos.z, data.power)
+        out[#out+1] = ("%s @ %d,%d,%d = %d")
+          :format(n and n.name or "?", pos.x, pos.y, pos.z, data.power)
       end
     end
-    if #out==0 then return true, "No powered Fabricate nodes within "..r.." nodes." end
+    if #out==0 then
+      return true,
+        "No powered Fabricate nodes within "..r.." nodes."
+    end
     table.sort(out)
     min.chat_send_player(name, "Powered Fabricate nodes:")
-    for _, line in ipairs(out) do min.chat_send_player(name, "  "..line) end
+    for _, line in ipairs(out) do
+      min.chat_send_player(name, "  "..line)
+    end
     return true, ""
   end
 })
@@ -1114,21 +1273,30 @@ min.register_chatcommand("fab_debug", {
 min.register_chatcommand("fab_probe", {
   description = "Show Fabricate power at the pointed node",
   func = function(name)
-    local pl = min.get_player_by_name(name); if not pl then return false,"no player" end
+    local pl = min.get_player_by_name(name)
+    if not pl then return false,"no player" end
     local eye = pl:get_pos(); eye.y = eye.y + 1.5
     local look = pl:get_look_dir()
-    local ray = min.raycast(eye, {x=eye.x+look.x*6,y=eye.y+look.y*6,z=eye.z+look.z*6}, true, false)
+    local ray = min.raycast(
+      eye,
+      {x=eye.x+look.x*6,y=eye.y+look.y*6,z=eye.z+look.z*6},
+      true, false
+    )
     local target
-    for hit in ray do if hit.type=="node" then target = hit.under; break end end
+    for hit in ray do
+      if hit.type=="node" then target = hit.under; break end
+    end
     if not target then return true, "No node targeted." end
     local k = pos_to_key(target)
     local e = fabricate.power_grid[k]
     local n = min.get_node_or_nil(target)
     local name_str = n and n.name or "?"
     if e then
-      return true, ("%s at %s has power %d"):format(name_str, min.pos_to_string(target), e.power)
+      return true, ("%s at %s has power %d")
+        :format(name_str, min.pos_to_string(target), e.power)
     else
-      return true, ("%s at %s has NO power"):format(name_str, min.pos_to_string(target))
+      return true, ("%s at %s has NO power")
+        :format(name_str, min.pos_to_string(target))
     end
   end
 })
@@ -1137,7 +1305,8 @@ min.register_chatcommand("fab_rescan", {
   description = "Rescan a radius around you and (re)track Fabricate parts",
   params = "[radius]",
   func = function(name, param)
-    local player = min.get_player_by_name(name); if not player then return false, "No player." end
+    local player = min.get_player_by_name(name)
+    if not player then return false, "No player." end
     local r = tonumber(param) or 16
     local pmin = vector.subtract(vector.round(player:get_pos()), r)
     local pmax = vector.add(vector.round(player:get_pos()), r)
@@ -1153,6 +1322,22 @@ min.register_chatcommand("fab_rescan", {
         end
       end
     end
-    return true, ("Tracked %d mechanical nodes within r=%d."):format(count, r)
+    return true,
+      ("Tracked %d mechanical nodes within r=%d.")
+        :format(count, r)
+  end
+})
+
+min.register_chatcommand("fab_belts", {
+  description = "List all active belts",
+  func = function(name)
+    for id, line in pairs(fabricate.belts or {}) do
+      min.chat_send_player(
+        name,
+        ("%s: %d segments, speed %.2f")
+          :format(id, #line.segments, line.speed or 0)
+      )
+    end
+    return true, "Done."
   end
 })
