@@ -33,6 +33,11 @@ local DIRS = {
   {x= 0,y= 0,z= 1},{x= 0,y= 0,z=-1},
 }
 
+local HDIRS = { -- horizontal adjacency for wheel clusters
+  {x= 1,y=0,z= 0}, {x=-1,y=0,z= 0},
+  {x= 0,y=0,z= 1}, {x= 0,y=0,z=-1},
+}
+
 local function facedir_to_dir(param2)
   local rot = (param2 or 0) % 4
   if rot == 0 then return {x=0,y=0,z= 1}
@@ -53,44 +58,27 @@ local function has_water_near_wheel(pos)
   return false
 end
 
--- Count contiguous (face-adjacent) water wheels that also have water nearby.
--- We only look in the 4 horizontal directions so "beside each other" matters.
-local HDIRS = {
-  {x= 1,y=0,z= 0}, {x=-1,y=0,z= 0},
-  {x= 0,y=0,z= 1}, {x= 0,y=0,z=-1},
-}
-
+-- contiguous, horizontally adjacent, water-fed wheel cluster size
 local function wheel_cluster_size(pos, limit)
-  limit = limit or 32  -- safety cap
+  limit = limit or 32
   local name = NS.."water_wheel"
-  local visited = {}
   local function k(p) return ("%d,%d,%d"):format(p.x,p.y,p.z) end
-
   local n = min.get_node_or_nil(pos)
-  if not (n and n.name == name and has_water_near_wheel(pos)) then
-    return 0
-  end
-
-  local queue = { vector.new(pos) }
-  visited[k(pos)] = true
-  local count = 0
-
-  while #queue > 0 and count < limit do
-    local cur = table.remove(queue, 1)
-    count = count + 1
+  if not (n and n.name == name and has_water_near_wheel(pos)) then return 0 end
+  local q, seen, count = {vector.new(pos)}, {[k(pos)]=true}, 0
+  while #q>0 and count<limit do
+    local cur = table.remove(q,1); count = count + 1
     for _,d in ipairs(HDIRS) do
       local np = {x=cur.x+d.x, y=cur.y+d.y, z=cur.z+d.z}
-      local key = k(np)
-      if not visited[key] then
+      local kk = k(np)
+      if not seen[kk] then
         local nn = min.get_node_or_nil(np)
         if nn and nn.name == name and has_water_near_wheel(np) then
-          visited[key] = true
-          queue[#queue+1] = np
+          seen[kk] = true; q[#q+1] = np
         end
       end
     end
   end
-
   return count
 end
 
@@ -111,41 +99,105 @@ local function track_mech(pos)   fabricate.tracked_mech[pos_to_key(pos)] = vecto
 local function untrack_mech(pos) fabricate.tracked_mech[pos_to_key(pos)] = nil end
 
 -- -------------------------------------------------
+-- Crack Overlay Entity (spritesheet: 16x80, 5 frames)
+-- -------------------------------------------------
+-- Required textures in textures/:
+--   fabricate_crack_strip.png (5 frames stacked vertically: 0..4)
+--   fabricate_crack_empty.png (fully transparent 16x16)
+local CRACK_SPRITE = "fabricate_crack_strip.png"
+local CRACK_EMPTY  = "fabricate_crack_empty.png"
+local CRACK_FRAMES = 5  -- frames indexed 0..4 (top→bottom)
+
+local function crack_textures_for(dir, frame)
+  local crack = CRACK_SPRITE .. "^[verticalframe:"..CRACK_FRAMES..":"..frame
+  -- Entity face order: top, bottom, right(+X), left(-X), back(+Z), front(-Z)
+  if     dir.x ==  1 then return {CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY}
+  elseif dir.x == -1 then return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY,CRACK_EMPTY}
+  elseif dir.z ==  1 then return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack,      CRACK_EMPTY}
+  elseif dir.z == -1 then return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,crack}
+  else
+    return {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY}
+  end
+end
+
+min.register_entity(NS.."crack_overlay", {
+  initial_properties = {
+    visual = "cube",
+    textures = {CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY,CRACK_EMPTY},
+    physical = false,
+    collide_with_objects = false,
+    pointable = false,
+    visual_size = {x=1.0,y=1.0,z=1.0},
+    use_texture_alpha = true,
+    shaded = false,
+    glow = 0,
+    static_save = false,
+  },
+  _dir = {x=0,y=0,z=1},
+  _frame = 0,
+
+  set_face_and_frame = function(self, dir, frame)
+    self._dir   = {x=dir.x,y=dir.y,z=dir.z}
+    self._frame = frame
+    self.object:set_properties({textures = crack_textures_for(dir, frame)})
+  end,
+})
+
+local function find_overlay_at(tpos)
+  for _, obj in ipairs(min.get_objects_inside_radius({x=tpos.x+0.5,y=tpos.y+0.5,z=tpos.z+0.5}, 0.6)) do
+    local ent = obj:get_luaentity()
+    if ent and ent.name == NS.."crack_overlay" then return obj, ent end
+  end
+  return nil, nil
+end
+
+local function ensure_overlay(tpos, dir, frame)
+  local obj, ent = find_overlay_at(tpos)
+  if not obj then
+    obj = min.add_entity({x=tpos.x+0.5,y=tpos.y+0.5,z=tpos.z+0.5}, NS.."crack_overlay")
+    ent = obj and obj:get_luaentity() or nil
+  end
+  if ent and ent.set_face_and_frame then ent:set_face_and_frame(dir, frame or 0) end
+  return obj, ent
+end
+
+local function remove_overlay(tpos)
+  local obj = find_overlay_at(tpos)
+  if obj then obj:remove() end
+end
+
+-- -------------------------------------------------
 -- Connectivity (face-adjacent)
 -- -------------------------------------------------
-local W   = NS.."water_wheel"
-local G   = NS.."gantry_shaft"
-local S   = NS.."shaft"
-local X   = NS.."gearbox"
-local F1  = NS.."encased_fan"
-local F2  = NS.."encased_fan_2"
-local H   = NS.."hand_crank"
-
-local function is_fan(name) return name == F1 or name == F2 end
+local W  = NS.."water_wheel"
+local G  = NS.."gantry_shaft"
+local S  = NS.."shaft"
+local X  = NS.."gearbox"
+local F  = NS.."encased_fan"
+local H  = NS.."hand_crank"
+local D  = NS.."mechanical_drill"
 
 local function can_connect(aname, bname)
   if not (is_mech(aname) and is_mech(bname)) then return false end
 
-  -- Wheel hands off to gantry/shaft/fan (robust)
-  if aname == W then return (bname == G or bname == S or is_fan(bname)) end
-  if bname == W then return (aname == G or aname == S or is_fan(aname)) end
+  -- Wheel mates with gantry, bare shaft, or a fan/drill
+  if aname == W then return (bname == G or bname == S or bname == F or bname == D) end
+  if bname == W then return (aname == G or aname == S or aname == F or aname == D) end
 
-  -- Gantry bridges broadly to simplify mounting
-  if aname == G or bname == G then return true end
+  -- Gantry bridges wheel ↔ driveline (and can pass to fan/drill)
+  if aname == G then return (bname == W or bname == S or bname == X or bname == G or bname == F or bname == D) end
+  if bname == G then return (aname == W or aname == S or aname == X or aname == G or aname == F or aname == D) end
 
-  -- Crank injects into driveline or fans
-  if aname == H then return (bname == S or bname == X or bname == G or is_fan(bname)) end
-  if bname == H then return (aname == S or aname == X or aname == G or is_fan(aname)) end
+  -- Crank can inject into driveline/fan/drill/gantry
+  if aname == H then return (bname == S or bname == X or bname == G or bname == F or bname == D) end
+  if bname == H then return (aname == S or aname == X or aname == G or aname == F or aname == D) end
 
-  -- Shafts/gearboxes interconnect; fans can hang off them
+  -- Shafts/gearboxes interconnect; fan/drill can hang off them
   local A_drive = (aname == S or aname == X)
   local B_drive = (bname == S or bname == X)
   if A_drive and B_drive then return true end
-  if A_drive and is_fan(bname) then return true end
-  if B_drive and is_fan(aname) then return true end
-
-  -- Allow fan↔fan (so a second fan can mirror off the first)
-  if is_fan(aname) and is_fan(bname) then return true end
+  if A_drive and (bname == F or bname == D) then return true end
+  if B_drive and (aname == F or aname == D) then return true end
 
   return false
 end
@@ -155,7 +207,7 @@ end
 -- -------------------------------------------------
 local function add_power(accum, key, pos, p)
   local ex = accum[key]
-  if not ex or ex.power < p then
+  if (not ex) or ex.power < p then
     accum[key] = {pos = vector.new(pos), power = p}
   end
 end
@@ -201,23 +253,23 @@ min.register_globalstep(function(dtime)
 
   local accum = {}
 
-  -- Start from every powered source
+  -- Sources → BFS
   for _, pos in pairs(fabricate.tracked_mech) do
     local node = min.get_node_or_nil(pos)
     if node and is_source(node.name) then
       local fn = get_power_for[node.name]
       local p  = fn and (fn(pos, node, dt, now) or 0) or 0
       if p > 0 then
-        add_power(accum, pos_to_key(pos), pos, p) -- show source
+        add_power(accum, pos_to_key(pos), pos, p)
         bfs(accum, pos, p)
       end
     end
   end
 
-  -- === Terminal fan backfill (for both fan types) ===
+  -- Terminal backfill for FAN & DRILL (inherit neighbor_power-1 if BFS missed)
   for _, pos in pairs(fabricate.tracked_mech) do
     local n = min.get_node_or_nil(pos)
-    if n and (n.name == F1 or n.name == F2) then
+    if n and (n.name == F or n.name == D) then
       local selfk = pos_to_key(pos)
       if not accum[selfk] then
         local best = 0
@@ -230,8 +282,7 @@ min.register_globalstep(function(dtime)
           end
         end
         if best > 0 then
-          local p = math.max(1, best - 1)
-          accum[selfk] = { pos = vector.new(pos), power = p }
+          add_power(accum, selfk, pos, math.max(1, best - 1))
         end
       end
     end
@@ -239,12 +290,12 @@ min.register_globalstep(function(dtime)
 
   fabricate.power_grid = accum
 
-  -- Reset infotexts
+  -- Clear infotexts
   for _, pos in pairs(fabricate.tracked_mech) do
     min.get_meta(pos):set_string("infotext", "")
   end
 
-  -- Drive consumers + label mechanical nodes
+  -- Drive consumers + labels
   for _, data in pairs(accum) do
     local pos, power = data.pos, data.power
     local node = min.get_node_or_nil(pos); if not node then goto continue end
@@ -257,24 +308,27 @@ min.register_globalstep(function(dtime)
 
     if is_mech(name) then
       local label = ({
-        [W]  = "Water Wheel",
-        [G]  = "Gantry Shaft",
-        [S]  = "Shaft",
-        [X]  = "Gearbox",
-        [H]  = "Hand Crank",
-        [F1] = "Encased Fan",
-        [F2] = "Encased Fan (2)",
+        [NS.."water_wheel"]     = "Water Wheel",
+        [NS.."gantry_shaft"]    = "Gantry Shaft",
+        [NS.."shaft"]           = "Shaft",
+        [NS.."gearbox"]         = "Gearbox",
+        [NS.."hand_crank"]      = "Hand Crank",
+        [NS.."encased_fan"]     = "Encased Fan",
+        [NS.."mechanical_drill"]= "Mechanical Drill",
       })[name] or name
       min.get_meta(pos):set_string("infotext", label.." (power "..power..")")
     end
     ::continue::
   end
 
-  -- Consumers without power → "no power"
+  -- Unpowered consumers
   for _, pos in pairs(fabricate.tracked_mech) do
     local node = min.get_node_or_nil(pos)
     if node and is_consumer(node.name) and not accum[pos_to_key(pos)] then
-      local label = (node.name == F2) and "Encased Fan (2)" or "Encased Fan"
+      local label = ({
+        [NS.."encased_fan"]      = "Encased Fan",
+        [NS.."mechanical_drill"] = "Mechanical Drill",
+      })[node.name] or "Consumer"
       min.get_meta(pos):set_string("infotext", label.." (no power)")
     end
   end
@@ -320,17 +374,14 @@ min.register_node(NS.."gearbox", {
   on_destruct  = untrack_mech,
 })
 
--- Gantry Shaft (adapter that mounts flush to wheel side; stub outward)
+-- Gantry Shaft
 local GANTRY_BOX = {
   type="fixed",
   fixed = {
-    -- collar (toward clicked block)
-    {-0.30,-0.30,-0.50,  0.30, 0.30,-0.25},
-    -- outward stub for a regular shaft
-    {-0.10,-0.10,-0.25,  0.10, 0.10, 0.50},
+    {-0.30,-0.30,-0.50,  0.30, 0.30,-0.25}, -- collar
+    {-0.10,-0.10,-0.25,  0.10, 0.10, 0.50}, -- outward stub
   }
 }
-
 min.register_node(NS.."gantry_shaft", {
   description = "Fabricate Gantry Shaft",
   drawtype    = "nodebox",
@@ -343,8 +394,6 @@ min.register_node(NS.."gantry_shaft", {
   groups      = { cracky=2, oddly_breakable_by_hand=2, fabricate_mech=1 },
   on_construct= track_mech,
   on_destruct = untrack_mech,
-
-  -- Make collar face the clicked block; stub points outward
   on_place = function(itemstack, placer, pt)
     if pt.type ~= "node" then return min.item_place(itemstack, placer, pt) end
     local under, above = pt.under, pt.above
@@ -360,7 +409,7 @@ min.register_node(NS.."gantry_shaft", {
   end,
 })
 
--- Hand Crank (dynamic test source)
+-- Hand Crank (dynamic source)
 min.register_node(NS.."hand_crank", {
   description = "Fabricate Hand Crank",
   drawtype    = "nodebox",
@@ -389,8 +438,7 @@ min.register_node(NS.."hand_crank", {
     fabricate.dynamic_sources[pos_to_key(pos)] = nil
   end,
   on_rightclick = function(pos, node, clicker)
-    local key = pos_to_key(pos)
-    fabricate.dynamic_sources[key] = {
+    fabricate.dynamic_sources[pos_to_key(pos)] = {
       pos        = vector.new(pos),
       base_power = 8,
       until_time = min.get_gametime() + 2,
@@ -407,25 +455,16 @@ get_power_for[NS.."hand_crank"] = function(pos, node, dt, now)
   return 0
 end
 
--- ===================== Water Wheel (source; recentered selection box) =====================
+-- Water Wheel (source; recentered selection box + cluster boost)
 do
-  -- Tunables to visually center the selection box on the mesh (local space offsets)
-  local SEL_OFF_X =  0.00   -- left/right nudge
-  local SEL_OFF_Y =  0.12   -- up/down nudge (raised a bit to reach rim)
-  local SEL_OFF_Z =  0.00   -- forward/back nudge
-
-  local SEL_HW = 0.50  -- half-width (X)
-  local SEL_HH = 0.62  -- half-height (Y)
-  local SEL_HD = 0.50  -- half-depth (Z)
-
+  -- Selection box tuned for a 1.25 visual_scale wheel
+  local SEL_OFF_X, SEL_OFF_Y, SEL_OFF_Z = 0.00, 0.12, 0.00
+  local SEL_HW, SEL_HH, SEL_HD = 0.50, 0.62, 0.50
   local function make_selbox()
-    local x1 = -SEL_HW + SEL_OFF_X
-    local x2 =  SEL_HW + SEL_OFF_X
-    local y1 = -SEL_HH + SEL_OFF_Y
-    local y2 =  SEL_HH + SEL_OFF_Y
-    local z1 = -SEL_HD + SEL_OFF_Z
-    local z2 =  SEL_HD + SEL_OFF_Z
-    return { type = "fixed", fixed = {{x1,y1,z1, x2,y2,z2}} }
+    local x1 = -SEL_HW + SEL_OFF_X; local x2 = SEL_HW + SEL_OFF_X
+    local y1 = -SEL_HH + SEL_OFF_Y; local y2 = SEL_HH + SEL_OFF_Y
+    local z1 = -SEL_HD + SEL_OFF_Z; local z2 = SEL_HD + SEL_OFF_Z
+    return { type="fixed", fixed={{x1,y1,z1, x2,y2,z2}} }
   end
 
   min.register_node(NS.."water_wheel", {
@@ -436,10 +475,8 @@ do
     paramtype    = "light",
     paramtype2   = "facedir",
     visual_scale = 1.25,
-
     selection_box = make_selbox(),
     collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
-
     groups       = { choppy=2, oddly_breakable_by_hand=2, fabricate_mech=1, fabricate_source=1 },
     on_construct = function(pos)
       track_mech(pos)
@@ -448,88 +485,197 @@ do
     on_destruct  = untrack_mech,
   })
 
-  -- Cluster-boosted wheels: each water wheel contributes base power,
--- and contiguous, water-fed wheels multiply the total.
-local WHEEL_BASE_POWER = 8
-local WHEEL_MAX_POWER  = 64  -- network safety cap so fans don't get absurd
-
-get_power_for[NS.."water_wheel"] = function(pos, node, dt, now)
-  local m = min.get_meta(pos)
-  if not has_water_near_wheel(pos) then
-    m:set_string("infotext","Water Wheel (no water)")
-    return 0
+  local WHEEL_BASE_POWER = 8
+  local WHEEL_MAX_POWER  = 64
+  get_power_for[NS.."water_wheel"] = function(pos, node, dt, now)
+    local m = min.get_meta(pos)
+    if not has_water_near_wheel(pos) then
+      m:set_string("infotext","Water Wheel (no water)")
+      return 0
+    end
+    local cluster = wheel_cluster_size(pos, 32)
+    local power = math.min(WHEEL_MAX_POWER, WHEEL_BASE_POWER * math.max(1, cluster))
+    m:set_string("infotext", ("Water Wheel (cluster %d → power %d)"):format(cluster, power))
+    return power
   end
-
-  -- Size of the horizontal wheel cluster that ALSO has water
-  local cluster = wheel_cluster_size(pos, 32)
-  local power = math.min(WHEEL_MAX_POWER, WHEEL_BASE_POWER * math.max(1, cluster))
-
-  m:set_string("infotext", ("Water Wheel (cluster %d → power %d)"):format(cluster, power))
-  return power
-end
 end
 
--- ===================== Encased Fans (consumers) =====================
-local function fan_on_power(pos, node, power, dt, label)
+-- Encased Fan (consumer)
+min.register_node(NS.."encased_fan", {
+  description = "Fabricate Encased Fan",
+  tiles = {
+    "fabricate_fan_back.png",   -- top
+    "fabricate_fan_back.png",   -- bottom
+    "fabricate_fan_casing.png", -- right
+    "fabricate_fan_casing.png", -- left
+    "fabricate_fan_casing.png", -- back
+    "fabricate_fan_front.png",  -- front
+  },
+  paramtype2   = "facedir",
+  groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
+  on_construct = function(pos)
+    track_mech(pos)
+    min.get_meta(pos):set_string("infotext","Encased Fan (no power)")
+  end,
+  on_destruct  = untrack_mech,
+})
+
+on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
   local meta = min.get_meta(pos)
-  if power < 2 then meta:set_string("infotext", label.." (no power)"); return end
-  meta:set_string("infotext", label.." (power "..power..")")
+  if power < 2 then meta:set_string("infotext","Encased Fan (no power)"); return end
+  meta:set_string("infotext","Encased Fan (power "..power..")")
 
-  -- Optional wind effect
   local dir   = facedir_to_dir(node.param2 or 0)
   local range = math.min(4 + math.floor(power/2), 12)
-
   local c = {
-    x = pos.x + dir.x * (range * 0.5 + 0.5),
-    y = pos.y + dir.y * (range * 0.5),
-    z = pos.z + dir.z * (range * 0.5 + 0.5),
+    x = pos.x + dir.x * (range*0.5 + 0.5),
+    y = pos.y + dir.y * (range*0.5),
+    z = pos.z + dir.z * (range*0.5 + 0.5),
   }
-
   for _, obj in ipairs(min.get_objects_inside_radius(c, range + 1)) do
     if obj:is_player() or obj:get_luaentity() then
-      local v = obj:get_velocity() or {x=0, y=0, z=0}
-      local boost = (power / 8) * 4
-      obj:set_velocity({
-        x = v.x + dir.x * boost,
-        y = v.y + (dir.y * boost * 0.2),
-        z = v.z + dir.z * boost,
-      })
+      local v = obj:get_velocity() or {x=0,y=0,z=0}
+      local boost = (power/8)*4
+      obj:set_velocity({ x=v.x+dir.x*boost, y=v.y+(dir.y*boost*0.2), z=v.z+dir.z*boost })
     end
   end
 end
 
--- Fan 1
-min.register_node(F1, {
-  description = "Fabricate Encased Fan",
+-- Mechanical Drill (consumer) + cracking overlay
+min.register_node(NS.."mechanical_drill", {
+  description = "Fabricate Mechanical Drill",
+  drawtype    = "nodebox",
   tiles = {
-    "fabricate_fan_back.png","fabricate_fan_back.png",
-    "fabricate_fan_casing.png","fabricate_fan_casing.png",
-    "fabricate_fan_casing.png","fabricate_fan_front.png",
+    "fabricate_drill_top.png",
+    "fabricate_drill_bottom.png",
+    "fabricate_drill_side.png",
+    "fabricate_drill_side.png",
+    "fabricate_drill_back.png",
+    "fabricate_drill_front.png",
   },
-  paramtype2   = "facedir",
+  paramtype   = "light",
+  paramtype2  = "facedir",
+  node_box = {
+    type="fixed",
+    fixed = {
+      {-0.40,-0.40,-0.40,  0.40, 0.40, 0.10}, -- body
+      {-0.10,-0.10, 0.10,  0.10, 0.10, 0.55}, -- bit
+    },
+  },
+  selection_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
+  collision_box = { type="fixed", fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
   groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
-  on_construct = function(pos) track_mech(pos); min.get_meta(pos):set_string("infotext","Encased Fan (no power)") end,
-  on_destruct  = untrack_mech,
+  on_construct = function(pos)
+    track_mech(pos)
+    local m = min.get_meta(pos)
+    m:set_string("infotext","Mechanical Drill (no power)")
+    m:set_float("drill_progress", 0.0)
+    m:set_string("drill_target", "")
+    m:set_int("drill_stage", 0)
+  end,
+  on_destruct  = function(pos)
+    local node = min.get_node_or_nil(pos)
+    local dir = facedir_to_dir(node and node.param2 or 0)
+    local tpos = {x=pos.x+dir.x,y=pos.y+dir.y,z=pos.z+dir.z}
+    remove_overlay(tpos)
+    untrack_mech(pos)
+  end,
 })
-on_power_for[F1] = function(pos, node, power, dt) fan_on_power(pos, node, power, dt, "Encased Fan") end
 
--- Fan 2 (identical behavior; allows a “second fan” anywhere in the chain)
-min.register_node(F2, {
-  description = "Fabricate Encased Fan (2)",
-  tiles = {
-    "fabricate_fan_back.png","fabricate_fan_back.png",
-    "fabricate_fan_casing.png","fabricate_fan_casing.png",
-    "fabricate_fan_casing.png","fabricate_fan_front.png",
-  },
-  paramtype2   = "facedir",
-  groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
-  on_construct = function(pos) track_mech(pos); min.get_meta(pos):set_string("infotext","Encased Fan (2) (no power)") end,
-  on_destruct  = untrack_mech,
-})
-on_power_for[F2] = function(pos, node, power, dt) fan_on_power(pos, node, power, dt, "Encased Fan (2)") end
+local function node_hardness(nodename)
+  if nodename == "air" then return 0 end
+  local def = min.registered_nodes[nodename]
+  if not def then return 6 end
+  if def.drawtype == "airlike" then return 0 end
+  if def.walkable == false then return 0 end
+  if def.liquidtype and def.liquidtype ~= "none" then return 0 end
+  local g = def.groups or {}
+  local h = 2
+  if g.cracky  then h = h + g.cracky  * 2 end
+  if g.crumbly then h = h + g.crumbly * 1 end
+  if g.choppy  then h = h + g.choppy  * 1 end
+  if g.level   then h = h + g.level   * 1 end
+  return math.max(1, h)
+end
+
+on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
+  local meta = min.get_meta(pos)
+  if power < 2 then
+    meta:set_string("infotext","Mechanical Drill (no power)")
+    meta:set_float("drill_progress", 0.0)
+    local dir = facedir_to_dir(node.param2 or 0)
+    remove_overlay({x=pos.x+dir.x,y=pos.y+dir.y,z=pos.z+dir.z})
+    meta:set_string("drill_target", "")
+    meta:set_int("drill_stage", 0)
+    return
+  end
+
+  local dir  = facedir_to_dir(node.param2 or 0)
+  local tpos = { x=pos.x + dir.x, y=pos.y + dir.y, z=pos.z + dir.z }
+  local tnode= min.get_node_or_nil(tpos)
+  if not tnode then
+    meta:set_string("infotext","Mechanical Drill (idle: unloaded)")
+    meta:set_float("drill_progress", 0.0)
+    remove_overlay(tpos)
+    meta:set_string("drill_target", "")
+    meta:set_int("drill_stage", 0)
+    return
+  end
+
+  local tname = tnode.name
+  local def   = min.registered_nodes[tname]
+  if (not def) or tname=="air" or (def.liquidtype and def.liquidtype~="none") or def.walkable==false then
+    meta:set_string("infotext","Mechanical Drill (idle)")
+    meta:set_float("drill_progress", 0.0)
+    remove_overlay(tpos)
+    meta:set_string("drill_target", "")
+    meta:set_int("drill_stage", 0)
+    return
+  end
+
+  if min.is_protected(tpos, "") then
+    meta:set_string("infotext","Mechanical Drill (area protected)")
+    remove_overlay(tpos)
+    return
+  end
+
+  local key = min.pos_to_string(tpos)
+  if meta:get_string("drill_target") ~= key then
+    meta:set_string("drill_target", key)
+    meta:set_float("drill_progress", 0.0)
+    meta:set_int("drill_stage", 0)
+    remove_overlay(tpos)
+  end
+
+  local hardness = node_hardness(tname)
+  local prog = meta:get_float("drill_progress")
+  local speed = (power / 8) * 1.2 -- 8 power ~ 1.2 hardness/sec
+  prog = prog + speed * dt
+
+  -- frame 0..(CRACK_FRAMES-1) from progress
+  local frame = math.min(CRACK_FRAMES-1, math.floor((prog / hardness) * CRACK_FRAMES))
+  local last  = meta:get_int("drill_stage")
+  if frame ~= last then
+    ensure_overlay(tpos, dir, frame)
+    meta:set_int("drill_stage", frame)
+  end
+
+  if prog >= hardness then
+    local drops = min.get_node_drops(tname) or {}
+    min.remove_node(tpos)
+    for _, item in ipairs(drops) do min.add_item(tpos, item) end
+    remove_overlay(tpos)
+    prog = 0.0
+    meta:set_string("drill_target","")
+    meta:set_int("drill_stage", 0)
+  end
+
+  meta:set_float("drill_progress", prog)
+  meta:set_string("infotext", ("Mechanical Drill (power %d, %.0f%%)"):format(power, (prog / hardness) * 100))
+end
 
 -- -------------------------------------------------
--- LBM: Track all existing fabricate_mech nodes when a mapblock loads
+-- LBM: Track existing fabricate_mech nodes when a mapblock loads
 -- -------------------------------------------------
 min.register_lbm({
   name = NS.."track_existing_mech",
@@ -565,14 +711,14 @@ min.register_craft({ output = NS.."encased_fan", recipe = {
   {"default:steel_ingot",NS.."shaft","default:steel_ingot"},
   {"default:steel_ingot","default:copper_ingot","default:steel_ingot"},
 }})
-min.register_craft({ output = NS.."encased_fan_2", recipe = {
-  {"default:steel_ingot","default:steel_ingot","default:steel_ingot"},
-  {"default:steel_ingot",NS.."shaft","default:steel_ingot"},
-  {"default:steel_ingot","default:copper_ingot","default:steel_ingot"},
+min.register_craft({ output = NS.."mechanical_drill", recipe = {
+  {"default:steel_ingot", NS.."shaft",       "default:steel_ingot"},
+  {"default:steel_ingot", "default:diamond", "default:steel_ingot"},
+  {"default:steel_ingot", NS.."gearbox",     "default:steel_ingot"},
 }})
 
 -- -------------------------------------------------
--- Debug: /fab_debug, /fab_probe, /fab_rescan
+-- Debug commands
 -- -------------------------------------------------
 min.register_chatcommand("fab_debug", {
   description = "List powered Fabricate nodes near you",
