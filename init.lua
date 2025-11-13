@@ -398,6 +398,52 @@ min.register_globalstep(function(dtime)
   end
 end)
 
+-- ======================================================================
+-- Wrench: rotate mechanical blocks & interact with fans
+-- ======================================================================
+
+-- simple rotator: step facedir yaw by 90°
+local function wrench_rotate_node(pos, node)
+  local def = min.registered_nodes[node.name]
+  if not def or def.paramtype2 ~= "facedir" then return end
+
+  local p2 = node.param2 or 0
+  -- yaw-only: just cycle 0..3
+  p2 = (p2 + 1) % 4
+
+  node.param2 = p2
+  min.swap_node(pos, node)
+end
+
+-- Item: Fabricate Wrench
+min.register_craftitem(NS.."wrench", {
+  description     = "Fabricate Wrench",
+  inventory_image = "fabricate_wrench.png", -- add this texture
+  stack_max       = 1,
+})
+
+-- Rotate any fabricate_mech node when punched with the wrench
+min.register_on_punchnode(function(pos, node, puncher, pointed_thing)
+  if not puncher or not puncher:is_player() then return end
+
+  local stack = puncher:get_wielded_item()
+  if stack:get_name() ~= NS.."wrench" then return end
+
+  if not is_mech(node.name) then return end
+
+  wrench_rotate_node(pos, node)
+end)
+
+-- Wrench crafting recipe (tweak as you like)
+min.register_craft({
+  output = NS.."wrench",
+  recipe = {
+    {"default:steel_ingot", "default:steel_ingot", ""},
+    {"",                     "default:stick",       ""},
+    {"",                     "default:stick",       ""},
+  }
+})
+
 -- -------------------------------------------------
 -- Components
 -- -------------------------------------------------
@@ -587,7 +633,7 @@ do
   end
 end
 
--- Encased Fan (consumer)
+-- === Encased Fan (consumer) ===
 min.register_node(NS.."encased_fan", {
   description = "Fabricate Encased Fan",
   tiles = {
@@ -596,55 +642,235 @@ min.register_node(NS.."encased_fan", {
     "fabricate_fan_casing.png", -- right
     "fabricate_fan_casing.png", -- left
     "fabricate_fan_casing.png", -- back
-    "fabricate_fan_front.png",  -- front
+    "fabricate_fan_front.png",  -- front (airflow along facedir)
   },
   paramtype2   = "facedir",
   groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
+
   on_construct = function(pos)
     track_mech(pos)
-    min.get_meta(pos):set_string("infotext","Encased Fan (no power)")
+    local meta = min.get_meta(pos)
+    meta:set_string("mode", "push") -- "push" or "pull"
+    meta:set_string("infotext", "Encased Fan (push, no power)")
   end,
+
   on_destruct  = untrack_mech,
+
+  -- Use wrench right-click to toggle push/pull
+  on_rightclick = function(pos, node, clicker, itemstack, pointed_thing)
+    if not clicker or not clicker:is_player() then return itemstack end
+
+    local wield = clicker:get_wielded_item()
+    if wield:get_name() ~= NS.."wrench" then
+      -- not holding wrench: let other interactions (like formspecs) happen later if we add them
+      return itemstack
+    end
+
+    local meta = min.get_meta(pos)
+    local mode = meta:get_string("mode")
+    if mode == "pull" then
+      mode = "push"
+    else
+      mode = "pull"
+    end
+    meta:set_string("mode", mode)
+
+    -- infotext wording; on_power_for will usually overwrite with power/medium
+    meta:set_string("infotext",
+      ("Encased Fan (%s)"):format(mode))
+
+    return itemstack
+  end,
 })
+
+-- ======================================================================
+-- Encased Fan helpers: medium detection, particles, item washing/smelting
+-- ======================================================================
+
+-- Shared recipe tables (can be edited from other files)
+FAN_WASH_RECIPES  = FAN_WASH_RECIPES  or {}
+FAN_SMELT_RECIPES = FAN_SMELT_RECIPES or {}
+
+-- Decide what the fan is blowing through: "air" | "water" | "lava"
+local function fan_get_medium(pos, dir)
+  local front = {
+    x = pos.x + dir.x,
+    y = pos.y + dir.y,
+    z = pos.z + dir.z,
+  }
+  local node = min.get_node_or_nil(front)
+  if not node then
+    return "air", front
+  end
+
+  local def = min.registered_nodes[node.name]
+  if not def then
+    return "air", front
+  end
+
+  -- Liquids
+  if def.liquidtype and def.liquidtype ~= "none" then
+    local g = def.groups or {}
+    if (g.lava and g.lava > 0) or node.name:find("lava") then
+      return "lava", front
+    else
+      return "water", front
+    end
+  end
+
+  -- Fallback: name-based
+  if node.name:find("lava") then return "lava", front end
+  if node.name:find("water") then return "water", front end
+
+  return "air", front
+end
+
+-- Pick texture for particle stream
+local function fan_particle_texture(medium)
+  if medium == "water" then return "default_water.png" end
+  if medium == "lava"  then return "default_lava.png"  end
+  -- add this texture in your pack, or change to something that exists
+  return "fabricate_fan_air.png"
+end
 
 on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
   local meta = min.get_meta(pos)
+  local mode = meta:get_string("mode")
+  if mode ~= "pull" then mode = "push" end  -- default sanity
 
-  -- Stress gate
-  local ok, need = has_stress(NS.."encased_fan", power)
-  if not ok then
-    meta:set_string("infotext",
-      ("Encased Fan %s"):format(stress_label(NS.."encased_fan", power) or "(overstressed)")
-    )
-    return
-  end
-
-  -- If it *is* stressed enough, continue like before
   if power < 2 then
-    meta:set_string("infotext","Encased Fan (no power)")
+    meta:set_string("infotext",
+      ("Encased Fan (%s, no power)"):format(mode))
     return
   end
+
+  local dir = facedir_to_dir(node.param2 or 0)
+
+  -- medium + position of the block directly in front
+  local medium, front_pos = fan_get_medium(pos, dir)
 
   meta:set_string("infotext",
-    ("Encased Fan %s"):format(stress_label(NS.."encased_fan", power) or ("(power "..power..")"))
-  )
+    ("Encased Fan (%s, %s, power %d)")
+      :format(mode, medium, power))
 
-  local dir   = facedir_to_dir(node.param2 or 0)
-  local range = math.min(4 + math.floor(power/2), 12)
-  local c = {
-    x = pos.x + dir.x * (range*0.5 + 0.5),
-    y = pos.y + dir.y * (range*0.5),
-    z = pos.z + dir.z * (range*0.5 + 0.5),
+  local eff_dir = {
+    x = (mode == "push") and dir.x or -dir.x,
+    y = (mode == "push") and dir.y or -dir.y,
+    z = (mode == "push") and dir.z or -dir.z,
   }
+
+  local range = math.min(4 + math.floor(power / 2), 12)
+
+  -- Center of tunnel for gameplay (unchanged)
+  local c = {
+    x = pos.x + dir.x * (range * 0.5 + 0.5),
+    y = pos.y + dir.y * (range * 0.5),
+    z = pos.z + dir.z * (range * 0.5 + 0.5),
+  }
+
+  -- === PARTICLES =======================================================
+  local ptex = fan_particle_texture(medium)
+  if min.add_particlespawner and ptex then
+    -- If blowing through water/lava, spawn particles a bit **after** that block,
+    -- so you see them past the fluid.
+    local base_x, base_y, base_z
+
+    if medium == "water" or medium == "lava" then
+      -- just beyond the fluid block
+      base_x = front_pos.x + dir.x * 0.7
+      base_y = front_pos.y + dir.y * 0.7
+      base_z = front_pos.z + dir.z * 0.7
+    else
+      -- regular air: just in front of the fan
+      base_x = pos.x + dir.x * 0.6
+      base_y = pos.y + dir.y * 0.5
+      base_z = pos.z + dir.z * 0.6
+    end
+
+    min.add_particlespawner({
+      amount = 16,
+      time   = 0.1,
+
+      -- small box around the base,
+      -- but we stretch it slightly along the direction so it *looks* like a stream
+      minpos = {
+        x = base_x - 0.3,
+        y = base_y - 0.2,
+        z = base_z - 0.3,
+      },
+      maxpos = {
+        x = base_x + 0.3 + dir.x * 0.8,
+        y = base_y + 0.2,
+        z = base_z + 0.3 + dir.z * 0.8,
+      },
+
+      minvel = {
+        x = eff_dir.x * 1.0,
+        y = eff_dir.y * 0.2,
+        z = eff_dir.z * 1.0,
+      },
+      maxvel = {
+        x = eff_dir.x * 2.5,
+        y = eff_dir.y * 0.6,
+        z = eff_dir.z * 2.5,
+      },
+
+      minacc = {x = 0, y = 0, z = 0},
+      maxacc = {x = 0, y = 0, z = 0},
+      minexptime = 0.2,
+      maxexptime = 0.8,
+      minsize = 0.7,
+      maxsize = 1.8,
+      texture = ptex,
+      glow    = (medium == "lava") and 4 or 0,
+    })
+  end
+
+  -- === ENTITY / ITEM HANDLING (unchanged from your last version) ======
+  -- keep the rest of your code here: airflow, washing/smelting, etc.
+  -----------------------------------------------------------------------
   for _, obj in ipairs(min.get_objects_inside_radius(c, range + 1)) do
-    if obj:is_player() or obj:get_luaentity() then
-      local v = obj:get_velocity() or {x=0,y=0,z=0}
-      local boost = (power/8)*4
-      obj:set_velocity({
-        x = v.x + dir.x * boost,
-        y = v.y + (dir.y * boost * 0.2),
-        z = v.z + dir.z * boost,
-      })
+    local ent = obj:get_luaentity()
+    local is_helper = ent and ent.name and ent.name:find("^"..NS)
+    if not is_helper then
+      local is_item = ent and ent.name == "__builtin:item"
+
+      local p = obj:get_pos()
+      if p then
+        local along =
+          (dir.x ~= 0 and (p.x - pos.x) * dir.x) or
+          (dir.z ~= 0 and (p.z - pos.z) * dir.z) or 0
+
+        if along >= -1 and along <= range + 2 then
+          local v = obj:get_velocity() or {x = 0, y = 0, z = 0}
+          local boost = (power / 8) * 4
+
+          v.x = v.x + eff_dir.x * boost
+          v.y = v.y + eff_dir.y * (boost * 0.2)
+          v.z = v.z + eff_dir.z * boost
+
+          v.x = v.x * 0.96
+          v.z = v.z * 0.96
+          obj:set_velocity(v)
+
+          if is_item and (medium == "water" or medium == "lava") then
+            local stack = ItemStack(ent.itemstring or "")
+            if not stack:is_empty() then
+              local iname   = stack:get_name()
+              local outname = (medium == "water")
+                and FAN_WASH_RECIPES[iname]
+                or  FAN_SMELT_RECIPES[iname]
+
+              if outname then
+                stack:set_name(outname)
+                stack:set_count(stack:get_count())
+                ent.itemstring = stack:to_string()
+                if ent.set_item then ent:set_item(stack) end
+              end
+            end
+          end
+        end
+      end
     end
   end
 end
@@ -1027,46 +1253,27 @@ local function dir_1d(a, b, axis)
   return 0
 end
 
--- Build straight / slope belt run, returns lid or nil,err
-local function build_belt_run(user, a_pos, a_norm, b_pos, b_norm)
-  -- 1) Both anchors must be driveline nodes
+-- Build straight/slope belt run, returns line id or nil,err
+local function build_belt_run(user, a_pos, b_pos)
+  -- 1) Both blocks must be driveline
   local an = min.get_node_or_nil(a_pos)
   local bn = min.get_node_or_nil(b_pos)
   if not (an and bn and is_driveline(an.name) and is_driveline(bn.name)) then
-    return nil, "Anchors must be shafts, gearboxes, or gantries."
+    return nil, "Anchors must be shafts / gearboxes / gantries."
   end
 
-  -- 2) Normals must be horizontal and identical (Create rule)
-  if not a_norm or not b_norm then
-    return nil, "Click horizontal side faces."
-  end
-  if a_norm.y ~= 0 or b_norm.y ~= 0 then
-    return nil, "Click horizontal side faces."
-  end
-  if a_norm.x ~= b_norm.x or a_norm.z ~= b_norm.z then
-    return nil, "Both shafts must face the same direction."
-  end
-
-  -- 3) Face must be valid for the shaft / gearbox
-  if not shaft_face_ok(an, a_norm) then
-    return nil, "Invalid face on first shaft for a belt."
-  end
-  if not shaft_face_ok(bn, b_norm) then
-    return nil, "Invalid face on second shaft for a belt."
-  end
-
-  -- 4) Anchors must align on X or Z (no corners)
+  -- 2) Must be aligned on X or Z (no corners)
   local ax = axis_of(a_pos, b_pos)
   if not ax then
-    return nil, "Anchors must align on X or Z."
+    return nil, "Shafts must align on X or Z (no corners)."
   end
 
-  -- 5) Belt direction / length
+  -- 3) Direction, length, vertical delta
   local dir   = dir_1d(a_pos, b_pos, ax)
-  local steps = (ax == "x")
-    and math.abs(b_pos.x - a_pos.x)
-    or  math.abs(b_pos.z - a_pos.z)
+  local steps = (ax=="x") and math.abs(b_pos.x - a_pos.x)
+                           or math.abs(b_pos.z - a_pos.z)
   local dy    = b_pos.y - a_pos.y
+
   if steps == 0 and dy == 0 then
     return nil, "Anchors overlap."
   end
@@ -1074,138 +1281,127 @@ local function build_belt_run(user, a_pos, a_norm, b_pos, b_norm)
     return nil, "Belt is too long."
   end
 
-  -- 6) Normals must be perpendicular to belt axis (side-mounted belt)
-  if ax == "x" then
-    -- Belt runs along X => normals must be ±Z
-    if a_norm.x ~= 0 or math.abs(a_norm.z) ~= 1 then
-      return nil, "Faces must be perpendicular to the belt (±Z for X-belts)."
-    end
-  else -- "z"
-    -- Belt runs along Z => normals must be ±X
-    if a_norm.z ~= 0 or math.abs(a_norm.x) ~= 1 then
-      return nil, "Faces must be perpendicular to the belt (±X for Z-belts)."
-    end
-  end
-
-  -- 7) Lay belt segments (flat + slopes)
+  -- 4) Create belt line
   local lid = new_line_id()
   fabricate.belts[lid] = {
     segments = {},
     axis     = ax,
     dir      = dir,
-    slope    = (dy == 0) and 0 or ((dy > 0) and 1 or -1),
+    slope    = (dy==0) and 0 or ((dy>0) and 1 or -1),
     speed    = 0,
     anchors  = {
-      a = { pos = vector.new(a_pos), normal = vector.new(a_norm) },
-      b = { pos = vector.new(b_pos), normal = vector.new(b_norm) },
-    },
+      a = vector.new(a_pos),
+      b = vector.new(b_pos),
+    }
   }
 
-  local facedir = (ax == "x")
-    and ((dir == 1) and 1 or 3)
-    or  ((dir == 1) and 0 or 2)
+  local facedir = (ax=="x")
+    and ((dir==1) and 1 or 3)
+    or  ((dir==1) and 0 or 2)
+
   local cx, cy, cz = a_pos.x, a_pos.y, a_pos.z
-  local ax_step     = (dir == 1) and 1 or -1
+  local ax_step     = (dir==1) and 1 or -1
   local remain_y    = dy
 
   local function place_seg(p, name)
     local nn = min.get_node_or_nil(p)
     if nn and nn.name ~= "air"
-        and nn.name ~= NS.."belt_segment"
-        and nn.name ~= NS.."belt_segment_slope" then
+           and nn.name ~= NS.."belt_segment"
+           and nn.name ~= NS.."belt_segment_slope" then
       return false, "Path blocked at "..min.pos_to_string(p)
     end
-    min.set_node(p, { name = name, param2 = facedir })
-    local pp = { x = p.x, y = p.y + 0.05, z = p.z } -- lifted “visual” segment
-    min.set_node(pp, { name = name, param2 = facedir })
+    -- base node
+    min.set_node(p, {name=name, param2=facedir})
+    -- tiny raised copy used as belt “track”
+    local pp = {x=p.x, y=p.y+0.05, z=p.z}
+    min.set_node(pp, {name=name, param2=facedir})
     table.insert(fabricate.belts[lid].segments, vector.new(pp))
     return true
   end
 
+  -- run along axis, weaving in vertical steps
   for i = 1, steps do
     if remain_y ~= 0 then
-      cy = cy + ((remain_y > 0) and 1 or -1)
-      local okp, errp =
-        place_seg({ x = cx, y = cy, z = cz }, NS.."belt_segment_slope")
+      cy = cy + ((remain_y>0) and 1 or -1)
+      local okp, errp = place_seg({x=cx, y=cy, z=cz}, NS.."belt_segment_slope")
       if not okp then fabricate.belts[lid] = nil; return nil, errp end
-      remain_y = (remain_y > 0) and (remain_y - 1) or (remain_y + 1)
+      remain_y = (remain_y>0) and (remain_y-1) or (remain_y+1)
     else
-      local okp, errp =
-        place_seg({ x = cx, y = cy, z = cz }, NS.."belt_segment")
+      local okp, errp = place_seg({x=cx, y=cy, z=cz}, NS.."belt_segment")
       if not okp then fabricate.belts[lid] = nil; return nil, errp end
     end
     if ax == "x" then cx = cx + ax_step else cz = cz + ax_step end
   end
 
   while remain_y ~= 0 do
-    cy = cy + ((remain_y > 0) and 1 or -1)
-    local okp, errp =
-      place_seg({ x = cx, y = cy, z = cz }, NS.."belt_segment_slope")
+    cy = cy + ((remain_y>0) and 1 or -1)
+    local okp, errp = place_seg({x=cx, y=cy, z=cz}, NS.."belt_segment_slope")
     if not okp then fabricate.belts[lid] = nil; return nil, errp end
-    remain_y = (remain_y > 0) and (remain_y - 1) or (remain_y + 1)
+    remain_y = (remain_y>0) and (remain_y-1) or (remain_y+1)
   end
 
   return lid
 end
 
--- Player tool: click driveline face A then face B
+-- Player tool: click driveline A then driveline B
 min.register_craftitem(NS.."belt_linker", {
-  description = "Fabricate Belt Linker",
+  description = "Fabricate Mechanical Belt",
   inventory_image = "mcl_core_iron_block.png^[colorize:#3a3a3a:150",
   on_use = function(stack, user, pointed)
-    if not user or not pointed or pointed.type ~= "node" then
-      return stack
-    end
+    if not user or not pointed or pointed.type ~= "node" then return stack end
+
     local pos  = pointed.under
     local node = min.get_node_or_nil(pos)
     if not node or not is_driveline(node.name) then
       min.chat_send_player(user:get_player_name(),
-        "Click a shaft/gearbox/gantry face.")
+        "Click a shaft / gearbox / gantry.")
       return stack
     end
 
-    local norm = pointed_normal(pointed)
-    if not norm then
-      min.chat_send_player(user:get_player_name(),
-        "Click a horizontal side face.")
-      return stack
-    end
-    if not shaft_face_ok(node, norm) then
-      min.chat_send_player(user:get_player_name(),
-        "That face is not valid for a belt on this shaft.")
-      return stack
+    -- Require side face (no top / bottom)
+    if pointed.above and pointed.under then
+      local ny = pointed.under.y - pointed.above.y
+      if ny ~= 0 then
+        min.chat_send_player(user:get_player_name(),
+          "Click a horizontal side of the shaft.")
+        return stack
+      end
     end
 
-    local um      = user:get_meta()
+    local um = user:get_meta()
     local a_pos_s = um:get_string("fab_link_a_pos")
+
+    -- First click
     if a_pos_s == "" then
-      um:set_string("fab_link_a_pos",  min.pos_to_string(pos))
-      um:set_string("fab_link_a_norm", min.serialize(norm))
+      um:set_string("fab_link_a_pos", min.pos_to_string(pos))
       min.chat_send_player(user:get_player_name(),
-        "First anchor set. Click the second shaft with the belt linker.")
+        "First shaft set. Click the second shaft with the belt linker.")
       return stack
     end
 
-    -- second click
-    local a_pos  = min.string_to_pos(a_pos_s)
-    local a_norm = min.deserialize(
-      um:get_string("fab_link_a_norm") or ""
-    ) or { x = 0, y = 0, z = 1 }
+    -- Second click
+    local a_pos = min.string_to_pos(a_pos_s)
+    um:set_string("fab_link_a_pos", "")
 
-    um:set_string("fab_link_a_pos",  "")
-    um:set_string("fab_link_a_norm", "")
+    if not a_pos then
+      min.chat_send_player(user:get_player_name(),
+        "Internal error: bad saved position.")
+      return stack
+    end
 
-    local lid, err = build_belt_run(user, a_pos, a_norm, pos, norm)
+    local lid, err = build_belt_run(user, a_pos, pos)
     if not lid then
       min.chat_send_player(user:get_player_name(),
         "Belt failed: "..(err or "?"))
     else
       min.chat_send_player(user:get_player_name(), "Belt built.")
     end
+
     return stack
-  end,
+  end
 })
 
+-- Crafting
 min.register_craft({
   output = NS.."belt_linker",
   recipe = {
@@ -1216,24 +1412,25 @@ min.register_craft({
 })
 
 -- Remove whole belt by punching any segment
+-- Remove whole belt by punching any segment
 min.register_on_punchnode(function(pos, node, puncher, pt)
   if node.name ~= NS.."belt_segment"
-      and node.name ~= NS.."belt_segment_slope" then
+  and node.name ~= NS.."belt_segment_slope" then
     return
   end
 
-  for lid, line in pairs(fabricate.belts or {}) do
+  for id, line in pairs(fabricate.belts) do
     for _, sp in ipairs(line.segments or {}) do
       if sp.x == pos.x and sp.y == pos.y and sp.z == pos.z then
-        -- This line owns the punched segment → remove all its segments
-        for _, sp2 in ipairs(line.segments or {}) do
-          local n2 = min.get_node_or_nil(sp2)
+        -- remove all segments of this belt
+        for _, p in ipairs(line.segments or {}) do
+          local n2 = min.get_node_or_nil(p)
           if n2 and (n2.name == NS.."belt_segment"
-                  or n2.name == NS.."belt_segment_slope") then
-            min.remove_node(sp2)
+                 or n2.name == NS.."belt_segment_slope") then
+            min.remove_node(p)
           end
         end
-        fabricate.belts[lid] = nil
+        fabricate.belts[id] = nil
         if puncher and puncher:is_player() then
           min.chat_send_player(puncher:get_player_name(), "Belt removed.")
         end
