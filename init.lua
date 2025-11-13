@@ -111,6 +111,43 @@ local function untrack_mech(pos)
   fabricate.tracked_mech[pos_to_key(pos)] = nil
 end
 
+-- =========================================================
+-- Stress Units (very simple Create-like stress model)
+-- =========================================================
+
+-- How much stress each consumer needs to run at full speed.
+-- Tune these numbers to taste.
+local STRESS_COST = {
+  [NS.."encased_fan"]      = 8,   -- light load
+  [NS.."mechanical_drill"] = 16,  -- heavier load
+  -- you can add more later: presses, saws, etc.
+}
+
+-- Optional: label for infotext
+local function stress_label(name, available)
+  local need = STRESS_COST[name]
+  if not need or need <= 0 then
+    return nil
+  end
+  if available < need then
+    return ("(overstressed: needs %d SU, has %d)"):format(need, available)
+  else
+    return ("(OK: needs %d SU, has %d)"):format(need, available)
+  end
+end
+
+-- Quick check helper
+local function has_stress(name, available)
+  local need = STRESS_COST[name]
+  if not need or need <= 0 then
+    return true, 0
+  end
+  if available < need then
+    return false, need
+  end
+  return true, need
+end
+
 -- -------------------------------------------------
 -- Crack Overlay Entity (spritesheet: 16x80, 5 frames)
 -- -------------------------------------------------
@@ -572,11 +609,25 @@ min.register_node(NS.."encased_fan", {
 
 on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
   local meta = min.get_meta(pos)
+
+  -- Stress gate
+  local ok, need = has_stress(NS.."encased_fan", power)
+  if not ok then
+    meta:set_string("infotext",
+      ("Encased Fan %s"):format(stress_label(NS.."encased_fan", power) or "(overstressed)")
+    )
+    return
+  end
+
+  -- If it *is* stressed enough, continue like before
   if power < 2 then
     meta:set_string("infotext","Encased Fan (no power)")
     return
   end
-  meta:set_string("infotext","Encased Fan (power "..power..")")
+
+  meta:set_string("infotext",
+    ("Encased Fan %s"):format(stress_label(NS.."encased_fan", power) or ("(power "..power..")"))
+  )
 
   local dir   = facedir_to_dir(node.param2 or 0)
   local range = math.min(4 + math.floor(power/2), 12)
@@ -598,7 +649,10 @@ on_power_for[NS.."encased_fan"] = function(pos, node, power, dt)
   end
 end
 
--- Mechanical Drill (consumer) + cracking overlay
+-- ======================================================================
+-- Mechanical Drill (consumer) + cracking overlay + stress gate
+-- ======================================================================
+
 min.register_node(NS.."mechanical_drill", {
   description = "Fabricate Mechanical Drill",
   drawtype    = "nodebox",
@@ -619,10 +673,14 @@ min.register_node(NS.."mechanical_drill", {
       {-0.10,-0.10, 0.10,  0.10, 0.10, 0.55}, -- bit
     },
   },
-  selection_box = { type="fixed",
-    fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
-  collision_box = { type="fixed",
-    fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}} },
+  selection_box = {
+    type  = "fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}},
+  },
+  collision_box = {
+    type  = "fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}},
+  },
   groups       = { cracky=2, fabricate_mech=1, fabricate_consumer=1 },
   on_construct = function(pos)
     track_mech(pos)
@@ -634,8 +692,8 @@ min.register_node(NS.."mechanical_drill", {
   end,
   on_destruct  = function(pos)
     local node = min.get_node_or_nil(pos)
-    local dir = facedir_to_dir(node and node.param2 or 0)
-    local tpos = {x=pos.x+dir.x,y=pos.y+dir.y,z=pos.z+dir.z}
+    local dir  = facedir_to_dir(node and node.param2 or 0)
+    local tpos = {x=pos.x+dir.x, y=pos.y+dir.y, z=pos.z+dir.z}
     remove_overlay(tpos)
     untrack_mech(pos)
   end,
@@ -659,21 +717,52 @@ end
 
 on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
   local meta = min.get_meta(pos)
-  if power < 2 then
-    meta:set_string("infotext","Mechanical Drill (no power)")
+
+  ------------------------------------------------------------------
+  -- 1) STRESS GATE
+  ------------------------------------------------------------------
+  -- assumes has_stress(name, power) -> ok:boolean, required:number
+  --         stress_label(name, power) -> string like "(OK 8/16)" or "(overstressed)"
+  local ok, _need = has_stress(NS.."mechanical_drill", power)
+  local stress_str = stress_label(NS.."mechanical_drill", power) or ("(power "..power..")")
+
+  if not ok then
+    meta:set_string("infotext", "Mechanical Drill "..stress_str)
+    -- reset cracking + progress if overstressed
+    local dir  = facedir_to_dir(node.param2 or 0)
+    local tpos = {x=pos.x+dir.x, y=pos.y+dir.y, z=pos.z+dir.z}
+    remove_overlay(tpos)
     meta:set_float("drill_progress", 0.0)
-    local dir = facedir_to_dir(node.param2 or 0)
-    remove_overlay({x=pos.x+dir.x,y=pos.y+dir.y,z=pos.z+dir.z})
+    meta:set_string("drill_target","")
+    meta:set_int("drill_stage", 0)
+    return
+  end
+
+  ------------------------------------------------------------------
+  -- 2) LOW POWER GATE
+  ------------------------------------------------------------------
+  if power < 2 then
+    meta:set_string("infotext", "Mechanical Drill "..stress_str.." (no power)")
+    local dir  = facedir_to_dir(node.param2 or 0)
+    local tpos = {x=pos.x+dir.x, y=pos.y+dir.y, z=pos.z+dir.z}
+    remove_overlay(tpos)
+    meta:set_float("drill_progress", 0.0)
     meta:set_string("drill_target", "")
     meta:set_int("drill_stage", 0)
     return
   end
 
+  ------------------------------------------------------------------
+  -- 3) TARGET BLOCK
+  ------------------------------------------------------------------
   local dir  = facedir_to_dir(node.param2 or 0)
-  local tpos = { x=pos.x + dir.x, y=pos.y + dir.y, z=pos.z + dir.z }
-  local tnode= min.get_node_or_nil(tpos)
+  local tpos = { x = pos.x + dir.x,
+                 y = pos.y + dir.y,
+                 z = pos.z + dir.z }
+  local tnode = min.get_node_or_nil(tpos)
+
   if not tnode then
-    meta:set_string("infotext","Mechanical Drill (idle: unloaded)")
+    meta:set_string("infotext","Mechanical Drill "..stress_str.." (idle: unloaded)")
     meta:set_float("drill_progress", 0.0)
     remove_overlay(tpos)
     meta:set_string("drill_target", "")
@@ -686,7 +775,7 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
   if (not def) or tname=="air"
       or (def.liquidtype and def.liquidtype~="none")
       or def.walkable==false then
-    meta:set_string("infotext","Mechanical Drill (idle)")
+    meta:set_string("infotext","Mechanical Drill "..stress_str.." (idle)")
     meta:set_float("drill_progress", 0.0)
     remove_overlay(tpos)
     meta:set_string("drill_target", "")
@@ -695,13 +784,17 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
   end
 
   if min.is_protected(tpos, "") then
-    meta:set_string("infotext","Mechanical Drill (area protected)")
+    meta:set_string("infotext","Mechanical Drill "..stress_str.." (area protected)")
     remove_overlay(tpos)
     return
   end
 
+  ------------------------------------------------------------------
+  -- 4) PER-BLOCK STATE + PROGRESS
+  ------------------------------------------------------------------
   local key = min.pos_to_string(tpos)
   if meta:get_string("drill_target") ~= key then
+    -- new target: reset progress + cracks
     meta:set_string("drill_target", key)
     meta:set_float("drill_progress", 0.0)
     meta:set_int("drill_stage", 0)
@@ -709,10 +802,12 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
   end
 
   local hardness = node_hardness(tname)
-  local prog = meta:get_float("drill_progress")
-  local speed = (power / 8) * 1.2 -- 8 power ~ 1.2 hardness/sec
+  local prog     = meta:get_float("drill_progress")
+  local speed    = (power / 8) * 1.2 -- 8 power ≈ 1.2 hardness/sec
+
   prog = prog + speed * dt
 
+  -- frame 0..(CRACK_FRAMES-1) from progress
   local frame = math.min(
     CRACK_FRAMES-1,
     math.floor((prog / hardness) * CRACK_FRAMES)
@@ -723,10 +818,15 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
     meta:set_int("drill_stage", frame)
   end
 
+  ------------------------------------------------------------------
+  -- 5) BREAK BLOCK
+  ------------------------------------------------------------------
   if prog >= hardness then
     local drops = min.get_node_drops(tname) or {}
     min.remove_node(tpos)
-    for _, item in ipairs(drops) do min.add_item(tpos, item) end
+    for _, item in ipairs(drops) do
+      min.add_item(tpos, item)
+    end
     remove_overlay(tpos)
     prog = 0.0
     meta:set_string("drill_target","")
@@ -734,10 +834,12 @@ on_power_for[NS.."mechanical_drill"] = function(pos, node, power, dt)
   end
 
   meta:set_float("drill_progress", prog)
+
+  local percent = (prog / hardness) * 100
   meta:set_string(
     "infotext",
-    ("Mechanical Drill (power %d, %.0f%%)")
-      :format(power, (prog / hardness) * 100)
+    ("Mechanical Drill %s, %.0f%%")
+      :format(stress_str, percent)
   )
 end
 
