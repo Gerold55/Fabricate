@@ -1,13 +1,11 @@
 -- items/belt_linker.lua
--- Mechanical Belt linker
+-- Mechanical Belt linker (Create-like two-click placement)
 
 local fabricate = rawget(_G, "fabricate")
 assert(fabricate, "fabricate: init.lua must load before belt_linker")
 
-local min = fabricate.min
-local NS  = fabricate.NS
-
-local BELT_MAX_LEN = fabricate.belt_max_len or 20
+local min  = fabricate.min
+local NS   = fabricate.NS
 
 local function same_pos(a, b)
   return a and b and a.x == b.x and a.y == b.y and a.z == b.z
@@ -29,12 +27,14 @@ min.register_craftitem(NS.."belt_linker", {
 
     local pos  = pointed.under
     local node = min.get_node_or_nil(pos)
-    if not node then return stack end
+    if not node then
+      return stack
+    end
 
     local pname = user:get_player_name() or ""
     local name  = node.name
 
-    -- we only belt between driveline blocks
+    -- Must click valid driveline part
     if name ~= NS.."shaft"
     and name ~= NS.."gearbox"
     and name ~= NS.."gantry_shaft" then
@@ -43,11 +43,12 @@ min.register_craftitem(NS.."belt_linker", {
       return stack
     end
 
-    -- side faces only
+    -- Require side face (no top/bottom)
     if pointed.above and pointed.under then
       local ny = pointed.under.y - pointed.above.y
       if ny ~= 0 then
-        min.chat_send_player(pname, "Click a horizontal side of the shaft.")
+        min.chat_send_player(pname,
+          "Click a horizontal side of the shaft.")
         return stack
       end
     end
@@ -55,7 +56,7 @@ min.register_craftitem(NS.."belt_linker", {
     local um        = user:get_meta()
     local saved_pos = um:get_string("fab_link_a_pos")
 
-    -- first click
+    -- First click: store A
     if saved_pos == "" then
       um:set_string("fab_link_a_pos", min.pos_to_string(pos))
       min.chat_send_player(pname,
@@ -63,7 +64,7 @@ min.register_craftitem(NS.."belt_linker", {
       return stack
     end
 
-    -- second click
+    -- Second click: B + build
     local a_pos = min.string_to_pos(saved_pos)
     um:set_string("fab_link_a_pos", "")
 
@@ -86,9 +87,10 @@ min.register_craftitem(NS.."belt_linker", {
     local lid, err = fabricate.build_belt_run(user, a_pos, pos)
     if not lid then
       min.chat_send_player(pname, "Belt failed: "..(err or "?"))
+      return stack
     else
       min.chat_send_player(pname, "Mechanical Belt placed.")
-      -- Belts consume one item on creation (Create-like)
+      -- Create behavior: initial belt placement consumes ONE belt
       stack:take_item(1)
     end
 
@@ -96,6 +98,7 @@ min.register_craftitem(NS.."belt_linker", {
   end,
 })
 
+-- Crafting recipe for belt item
 min.register_craft({
   output = NS.."belt_linker",
   recipe = {

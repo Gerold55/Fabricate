@@ -10,6 +10,7 @@ local untrack_mech = helpers.untrack_mech
 ---------------------------------------------------
 -- Shaft
 ---------------------------------------------------
+-- Shaft (slimmer stub so belts encompass it better)
 min.register_node(NS.."shaft", {
   description = "Fabricate Shaft",
   drawtype    = "nodebox",
@@ -17,12 +18,21 @@ min.register_node(NS.."shaft", {
   paramtype   = "light",
   paramtype2  = "facedir",
   node_box    = {
-    type="fixed",
-    fixed = { {-0.1,-0.1,-0.5, 0.1,0.1,0.5} }, -- rod along Z
+    type = "fixed",
+    -- thinner and slightly shorter rod along Z
+    fixed = { {-0.08,-0.08,-0.45, 0.08,0.08,0.45} },
+  },
+  selection_box = {
+    type  = "fixed",
+    fixed = {{-0.5,-0.5,-0.5, 0.5,0.5,0.5}},
+  },
+  collision_box = {
+    type  = "fixed",
+    fixed = {{-0.08,-0.08,-0.45, 0.08,0.08,0.45}},
   },
   groups      = { cracky=2, oddly_breakable_by_hand=2, fabricate_mech=1 },
-  on_construct= track_mech,
-  on_destruct = untrack_mech,
+  on_construct= fabricate.helpers.track_mech,
+  on_destruct = fabricate.helpers.untrack_mech,
 
   on_place = function(itemstack, placer, pt)
     if pt.type ~= "node" then

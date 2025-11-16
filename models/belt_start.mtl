@@ -1,0 +1,6 @@
+# Made in Blockbench 5.0.2
+newmtl m_b6e34d10-35f1-cd03-9d70-5aa8bf77bc00
+map_Kd belt.png
+newmtl m_a048d5b8-c474-230f-4fc2-2ab95e17fa23
+map_Kd belt_offset.png
+newmtl none
